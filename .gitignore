@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# uv
+.uv/
+uv.lock
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# AdaRubric output — run artifacts. There should only be ONE canonical `output/`; this pattern
+# also catches any stray numbered dirs (output2/, output3/, …) left over from ad-hoc test runs.
+results/
+output*/
+*.log
+
+# Cloned datasets (large; not part of the repo)
+dataset/
+
+# Internal port log / working notes (not part of the published repo)
+converting/
+understanding/
+
+# Tests (kept local, not published)
+tests/

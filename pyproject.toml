@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "adarubric"
+version = "0.1.0"
+description = "Evaluate how coding agents discover and use Agent Skills (Python port of skillgrade)."
+readme = "ReadMe.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Traversaal" }]
+keywords = ["ai", "agent", "skills", "evaluation", "benchmark", "skillsbench"]
+dependencies = [
+    "typer>=0.12",
+    "pyyaml>=6.0",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+adarubric = "adarubric.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/adarubric"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

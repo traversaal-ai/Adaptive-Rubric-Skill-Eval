@@ -1,0 +1,105 @@
+"""Local sandbox — runs attempts directly on the host in an OS temp workspace.
+
+Cross-platform: the workspace is an OS temp dir (``tempfile.mkdtemp``), not a hardcoded ``/tmp``,
+and commands run through the platform shell. Skills are injected into both agent discovery
+locations so whichever harness runs can find them.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+from adarubric.core.contracts import PROMPT_RELPATH, Harness, Sandbox
+from adarubric.core.models import EvalSpec, ShellResult
+
+
+class LocalSandbox(Sandbox):
+    name = "local"
+
+    def setup(self, spec: EvalSpec, harness: Harness, env: dict[str, str] | None = None) -> str:
+        workspace = tempfile.mkdtemp(prefix="adarubric-")
+        root = Path(workspace)
+
+        # 1. Copy the task's workspace inputs in (plain files → basename; map → explicit dest).
+        staging = {f: Path(f).name for f in spec.workspace_files}
+        staging.update(spec.workspace_map)
+        for src_s, dest_rel in staging.items():
+            src = Path(src_s)
+            if not src.exists():
+                continue
+            dst = root / dest_rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if src.is_dir():
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src, dst)
+
+        # 2. Write the canonical prompt file (harnesses read it via stdin redirection).
+        prompt = root / PROMPT_RELPATH
+        prompt.parent.mkdir(parents=True, exist_ok=True)
+        prompt.write_text(spec.instruction, encoding="utf-8")
+
+        # 3. Inject each skill into the RUNNING harness's discovery dir(s) — relative to the
+        #    workspace root (local runs the agent with cwd=workspace, so project discovery finds it).
+        for discovery in harness.skill_dirs:
+            base = root / discovery
+            base.mkdir(parents=True, exist_ok=True)
+            for spath in spec.skill_paths:
+                sp = Path(spath)
+                if sp.is_dir():
+                    shutil.copytree(sp, base / sp.name, dirs_exist_ok=True)
+
+        return workspace
+
+    def run_command(
+        self, workspace: str, command: str, env: dict[str, str] | None = None
+    ) -> ShellResult:
+        proc = subprocess.run(  # noqa: S602 - shell is intentional (agent CLIs are shell commands)
+            command,
+            shell=True,
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",  # agent CLIs emit UTF-8; never crash on Windows locale codecs
+            env={**os.environ, **(env or {})},
+        )
+        return ShellResult(stdout=proc.stdout, stderr=proc.stderr, exit_code=proc.returncode)
+
+    def stage(self, workspace: str, host_src: str, dest: str) -> None:
+        src = Path(host_src)
+        dst = Path(workspace) / dest.lstrip("/\\")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if src.is_dir():
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+        elif src.exists():
+            shutil.copy2(src, dst)
+
+    def export_workspace(self, workspace: str, dest_dir: str) -> None:
+        dest = Path(dest_dir)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(workspace, dest, dirs_exist_ok=True)
+
+    def list_files(self, workspace: str) -> dict[str, str]:
+        root = Path(workspace)
+        snapshot: dict[str, str] = {}
+        for p in root.rglob("*"):
+            if p.is_file():
+                snapshot[p.relative_to(root).as_posix()] = _sha256(p)
+        return snapshot
+
+    def cleanup(self, workspace: str) -> None:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
