@@ -31,6 +31,18 @@ from adarubric.core.models import (
 #: container-safe (replaces the old python/base64 shim).
 PROMPT_RELPATH = ".adarubric/prompt.md"
 
+#: AdaRubric control files/dirs that define the task or its grading. When a skill folder is injected
+#: into an agent's discovery dir, these are STRIPPED — they must never be visible to the agent, or
+#: the eval (instruction source, grader definition) would leak into the workspace. This is the
+#: isolation guarantee for the "drop SKILL.md + grader.yaml in one folder" convention.
+SKILL_INJECT_IGNORE = (
+    "grader.yaml", "grader.yml",
+    "adarubric.yaml", "adarubric.yml",
+    "eval.yaml", "eval.yml",
+    "TASK.md",
+    ".adarubric",
+)
+
 
 class RunCommand(Protocol):
     """Callback that runs a shell command in the attempt's workspace and returns its result.

@@ -10,8 +10,6 @@ It accepts **two input shapes**:
 - a **[SkillsBench](https://github.com/benchflow-ai/skillsbench)** task package (`task.md` +
   `environment/` + `verifier/` + `oracle/`).
 
-> This is a Python port of [skillgrade](https://github.com/mgechev/skillgrade), built piece by piece.
-
 ---
 
 ## Install
@@ -34,28 +32,49 @@ GEMINI_API_KEY=...
 
 ---
 
-## Quickstart — the three ways to run
+## Quickstart — the ways to run
 
-### 1. A plain skill folder (generic mode, local)
+> **Generic mode = your own skill.** You give AdaRubric a folder; it assembles the run and
+> **generates** the manifest `eval.yaml` into the output. `eval.yaml` is *never* something you
+> write — it's the record of what ran.
 
-```bash
-uv run adarubric run ./path/to/my-skill \
-    --harness claude-code \
-    --instruction "Refactor utils.py to remove duplication." \
-    --env-file .env
+### 1. The convention folder (recommended for your own skills)
+
+Put your skill's `SKILL.md` in a folder, and — at the folder root — optionally add a **`TASK.md`**
+(the instruction given to the agent) and a **`grader.yaml`** (the deterministic checks). Then point
+at the folder:
+
 ```
-
-### 2. Your own skill/task with a config file (generic mode)
-
-Drop an `adarubric.yaml` (or a skillgrade-style `eval.yaml`) next to the skill to supply the
-instruction, workspace files, and an optional Docker recipe — then just point at it:
-
-```bash
-uv run adarubric run ./my-task --harness claude-code --sandbox docker --env-file .env
+my-skill/
+  SKILL.md         # the skill under test (required)
+  TASK.md          # the instruction (optional; or pass --instruction)
+  grader.yaml      # deterministic checks (optional; omit for an ungraded run)
 ```
 
 ```yaml
-# adarubric.yaml (generic mode, all-in-one)
+# grader.yaml — reward = weighted pass fraction of these checks
+graders:
+  - run: pytest -q                 # a shell check; exit 0 (or "REWARD SCORE: x") → score
+    weight: 1.0
+  - run: test -f report.txt
+    weight: 0.5
+```
+
+```bash
+uv run adarubric run ./my-skill --harness claude-code --dataset generic --env-file .env
+# (TASK.md supplies the instruction; --instruction overrides it)
+```
+
+`TASK.md` and `grader.yaml` are **control files** — they are stripped out before the skill is
+injected, so the agent never sees the task's grading.
+
+### 2. Power-user single file (`adarubric.yaml`)
+
+When you need a Docker recipe, workspace input files, or several tasks in one file, drop an
+**`adarubric.yaml`** next to `SKILL.md` instead (it wins over the convention files):
+
+```yaml
+# adarubric.yaml (all-in-one)
 name: my-task
 instruction: |
   Solve the task described in the workspace.
@@ -72,25 +91,60 @@ graders:
     weight: 1.0
 ```
 
+```bash
+uv run adarubric run ./my-task --harness claude-code --dataset generic --sandbox docker --env-file .env
+```
+
 ### 3. A SkillsBench benchmark task (skillbench mode, Docker)
+
+**Get the dataset first.** SkillsBench is a separate, large repo — it's **not vendored here** (it's
+gitignored under `dataset/`). Clone it yourself:
+
+```bash
+git clone https://github.com/benchflow-ai/skillsbench dataset/skillsbench
+# tasks then live at dataset/skillsbench/tasks/<task-id>/
+```
+
+- **Source:** [github.com/benchflow-ai/skillsbench](https://github.com/benchflow-ai/skillsbench)
+  (~87 task packages across 8 domains; paper: arXiv 2602.12670).
+- **Layout:** each task is `tasks/<id>/{task.md, environment/{Dockerfile,skills/}, verifier/, oracle/}`.
 
 SkillsBench tasks are Docker-native (they hardcode `/app`, `/verifier`, `/logs`), so run them faithfully
 in Docker — the task's own `environment/Dockerfile` is built and the `verifier/` scores the result:
 
 ```bash
 uv run adarubric run dataset/skillsbench/tasks/dialogue-parser \
-    --harness claude-code --sandbox docker --env-file .env
+    --harness claude-code --dataset skillbench --sandbox docker --env-file .env
 ```
 
-### Run several harnesses / repetitions
+### Run several harnesses / pick a model per harness / repeat
 
 ```bash
 # same task on three harnesses (a matrix run) — each lands in its own output folder
 uv run adarubric run <task> --harness claude-code,codex,gemini-cli --sandbox docker --env-file .env
 
-# 3 repetitions ("trials") inside one launch, pinning the model
-uv run adarubric run <task> --harness claude-code --model claude-opus-4-8 --trials 3 --env-file .env
+# pin a DIFFERENT model per harness with name:model
+uv run adarubric run <task> \
+    --harness claude-code:claude-opus-4-8,codex:gpt-5-codex,gemini-cli:gemini-2.5-pro \
+    --sandbox docker --env-file .env
+
+# one default model for every harness (--model), repeated 3 times ("trials")
+uv run adarubric run <task> --harness claude-code,codex --model claude-opus-4-8 --trials 3 --env-file .env
 ```
+
+### Files you write vs files AdaRubric generates
+
+The three `*.yaml` names are easy to confuse — here's the whole truth:
+
+| File | Written by | In / out | What it holds |
+|------|-----------|----------|---------------|
+| `grader.yaml` | **you** (optional) | input | *Only* the deterministic checks (`graders:` — commands + weights). Convention mode. |
+| `adarubric.yaml` | **you** (optional) | input | The all-in-one config: instruction + workspace + docker + graders + timeout (+ multi-task). Wins over the convention files. |
+| `eval.yaml` | **AdaRubric** (always) | **output** | The generated manifest/receipt of a run: harness, model (requested + observed), env, skills, grading pointers. You never author it. |
+
+`grader.yaml` and `adarubric.yaml` are **inputs you author**; `eval.yaml` is the **record we
+produce**. All input control files (`grader.yaml`, `adarubric.yaml`, `TASK.md`) are stripped before
+the skill is injected, so the agent never sees the task's grading.
 
 ---
 
@@ -99,12 +153,12 @@ uv run adarubric run <task> --harness claude-code --model claude-opus-4-8 --tria
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `<path>` | — | A skill folder or a SkillsBench task package. |
-| `--harness` | *(required)* | `claude-code` \| `gemini-cli` \| `codex`, comma-separated for a matrix run. Explicit — **no key auto-detection**. |
+| `--harness` | *(required)* | `claude-code` \| `gemini-cli` \| `codex`, comma-separated for a matrix run. Explicit — **no key auto-detection**. Pin a model per harness with `name:model` (e.g. `claude-code:claude-opus-4-8,codex:gpt-5-codex`). |
 | `--sandbox` | `local` | `local` (OS temp dir) or `docker` (isolated container; required for faithful SkillsBench runs). |
-| `--model` | *(CLI default)* | Pin the harness model (e.g. `claude-opus-4-8`, `gpt-5-codex`, `gemini-2.5-pro`). Recorded in `eval.yaml`. |
+| `--model` | *(CLI default)* | Default model for **all** harnesses (e.g. `claude-opus-4-8`). Overridden per harness by `name:model` in `--harness`. Recorded in `eval.yaml`. |
 | `--dataset` | `auto` | `auto` detects the shape; `skillbench` / `generic` validate or force a pipeline. |
-| `--instruction` | — | Overrides `task.md` / the config; required for a bare skill folder. |
-| `--task` | first | Pick a task from a multi-task `eval.yaml`. |
+| `--instruction` | — | Overrides `TASK.md` / `task.md` / the config; required if none of them supply one. |
+| `--task` | first | Pick a task from a multi-task `adarubric.yaml`. |
 | `--output` | `output` | Output root: results land in `<output>/<harness>/<task>/attempt-N/`. |
 | `--trials` | `1` | Repetitions inside this launch (agents are non-deterministic). |
 | `--timeout` | config/300 | Per-harness timeout in seconds. |
@@ -159,6 +213,9 @@ stdin redirection (`cli … < .adarubric/prompt.md`) — cross-platform, contain
 AdaRubric-Skill-Eval/
   ReadMe.md
   coding_agent_harness.md        how the harnesses work + how to add your own (incl. ACP)  ← start here for harnesses
+  dashboard/                     the run-tracker UI (outside the package)
+    template.html                self-contained dashboard (charts/logs/cost); sample data when opened directly
+    generate.py                  scans output/ → writes a standalone report.html
   pyproject.toml                 Typer + uv; console script `adarubric`
   src/adarubric/
     cli.py                       Typer app (thin edge — parse flags, delegate)
@@ -207,14 +264,15 @@ output/
 > Keep a single `output/` — the `.gitignore` matches `output*/`, so it (and any stray `output2/`,
 > `output3/` from ad-hoc runs) stay out of git.
 
-### `eval.yaml` (the manifest)
+### `eval.yaml` (the generated manifest)
 
-Written to the attempt folder **before** any trial runs (host-only, never enters the sandbox). It
-records the task, mode, instruction, the **harness** (`id`, `cli`, requested `model`, `skill_dirs`,
-and env-var **names** — never values), the environment (sandbox, Dockerfile / base+setup), the injected
-skills, and grading pointers. After the trials finish, the actually-observed model(s) are added as
-`harness.model_observed` — so you can confirm which model really ran (useful when you let the CLI pick
-its own default).
+**AdaRubric generates this — you never write it** (your input is `adarubric.yaml` or the convention
+files). It's written to the attempt folder **before** any trial runs (host-only, never enters the
+sandbox) and records the task, mode, instruction, the **harness** (`id`, `cli`, requested `model`,
+`skill_dirs`, and env-var **names** — never values), the environment (sandbox, Dockerfile /
+base+setup), the injected skills, and grading pointers. After the trials finish, the actually-observed
+model(s) are added as `harness.model_observed` — so you can confirm which model really ran (useful
+when you let the CLI pick its own default).
 
 ### `run.json` (metrics)
 
@@ -236,6 +294,56 @@ Its observability differs per harness (Claude Code: definitive; Codex: partial; 
 
 Claude Code, Gemini CLI, and Codex are built in. To use them, add your own, or attach an
 **ACP-compatible** agent, see **[`coding_agent_harness.md`](coding_agent_harness.md)**.
+
+**Verified so far:** claude-code (local + Docker) and codex (local) have real end-to-end runs.
+**gemini-cli is not yet run live** — its adapter is written but unverified, and its `skill_opened`
+is `None` by design (its output exposes no per-tool trajectory). See the verification table in
+[`coding_agent_harness.md`](coding_agent_harness.md) before trusting gemini numbers.
+
+---
+
+## Tracking UI
+
+Two UIs, for two moments:
+
+### 1. Live progress (during a run) — terminal
+
+While a run happens, [src/adarubric/reporting/terminal.py](src/adarubric/reporting/terminal.py)
+(`TerminalReporter`) prints each stage as it happens (the runner emits a `ProgressEvent` per stage):
+
+```
+> claude-code/dialogue-parser attempt 1
+  > trial 1
+      . preparing → setting_up → running → exporting → grading
+  = trial 1: done  reward=1.00
+```
+
+The final per-trial summary (score, tokens, cost, time, file changes) is printed by
+[cli.py](src/adarubric/cli.py). This stays in-package because the CLI imports it at runtime.
+
+### 2. The dashboard (after runs) — [`dashboard/`](dashboard/)
+
+A **self-contained HTML run tracker** — accuracy, cost, tokens, skill-usage, and per-run logs, with
+charts. It lives **outside `src/`** (top-level `dashboard/`) and reads the `output/` tree:
+
+```bash
+python dashboard/generate.py --output output      # → dashboard/report.html (open in any browser)
+```
+
+- **[dashboard/template.html](dashboard/template.html)** — the UI (inline CSS/JS, no dependencies,
+  theme-aware). Opened directly it shows sample data, so it doubles as a preview.
+- **[dashboard/generate.py](dashboard/generate.py)** — scans `output/<harness>/<task>/attempt-*/…`,
+  embeds every run's metrics into the template, and writes a **single offline `report.html`** (no
+  server, no network). Handles both the `attempt-N/trial-T/` and older `attempt-N/` layouts.
+
+What it shows: KPI strip (runs, mean reward, skill-opened rate, total cost, total tokens),
+per-harness bar charts (mean reward, **mean turns-to-answer**, total cost, total tokens), and a
+filterable runs table with a **Turns** column. Click any past run to expand its full detail:
+turns / tool calls / commands, tool breakdown, tokens, cost, reward + skill-usage, the **created /
+modified / deleted file lists**, and the `raw.log` excerpt.
+
+> The reporter (live) stays under `src/adarubric/` because it's imported at runtime; the dashboard
+> (post-run report generator) is a standalone tool, so it lives outside the package in `dashboard/`.
 
 ---
 

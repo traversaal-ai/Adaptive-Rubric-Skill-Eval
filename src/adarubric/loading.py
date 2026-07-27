@@ -1,14 +1,20 @@
 """Input loading — turns a path into a normalized :class:`EvalSpec`.
 
-Accepts three shapes and collapses them into one:
+Accepts several shapes and collapses them into one. ``eval.yaml`` is NOT an input name — it is
+reserved for the manifest AdaRubric *generates* into the output folder.
+
   (a) a SkillsBench ``tasks/<id>/`` package: ``task.md`` (instruction) + ``environment/skills/*``
       + ``environment/Dockerfile`` + ``verifier/`` + ``oracle/solve.sh``  → ``mode="skillbench"``;
-  (b) a folder with a config file (``adarubric.yaml`` or skillgrade-style ``eval.yaml``): the file
-      supplies instruction / workspace files / docker base+setup / timeout  → ``mode="generic"``;
-  (c) a plain skill folder (``SKILL.md`` at root, or ``skills/*/SKILL.md``) + an explicit
-      instruction  → ``mode="generic"``.
+  (b) a folder with an ``adarubric.yaml`` config (power users): the file supplies instruction /
+      workspace files / docker base+setup / timeout / graders  → ``mode="generic"``;
+  (c) the **convention** folder (default for your own skills): a ``SKILL.md`` skill plus, at the
+      folder root, an optional ``TASK.md`` (the instruction) and an optional ``grader.yaml``
+      (deterministic checks). AdaRubric assembles the run and generates the output ``eval.yaml``.
+      → ``mode="generic"``. ``--instruction`` overrides ``TASK.md``.
 
-Ported from skillgrade `src/core/skills.ts`/`config.ts` plus SkillsBench layout handling.
+Both (b) and (c) are supported: an ``adarubric.yaml`` wins when present; otherwise the convention
+files are read. The ``TASK.md`` / ``grader.yaml`` control files are stripped from the skill before
+injection (see ``SKILL_INJECT_IGNORE``) so the agent never sees the task's grading.
 """
 
 from __future__ import annotations
@@ -20,20 +26,22 @@ import yaml
 
 from adarubric.core.models import EvalSpec, GraderSpec
 
-_CONFIG_FILES = ("adarubric.yaml", "adarubric.yml", "eval.yaml", "eval.yml")
+_CONFIG_FILES = ("adarubric.yaml", "adarubric.yml")
+_GRADER_FILES = ("grader.yaml", "grader.yml")
 
 
 def load_spec(path: str, instruction: str | None = None, task: str | None = None) -> EvalSpec:
     """Resolve ``path`` into an :class:`EvalSpec`.
 
-    ``instruction`` overrides whatever the task/config supplies (and is required when there is no
-    task file or config). ``task`` selects a named task from a multi-task eval.yaml.
+    ``instruction`` overrides whatever the task/config/``TASK.md`` supplies (and is required when
+    none of them exist). ``task`` selects a named task from a multi-task ``adarubric.yaml``.
     """
     p = Path(path).expanduser().resolve()
     if not p.exists():
         raise FileNotFoundError(f"Path not found: {p}")
     if p.is_file():
-        # Point at a SKILL.md / task.md / eval.yaml → use its directory (a yaml keeps priority).
+        # Point at a config .yaml → treat as an explicit config (any name, since it's explicit);
+        # point at a SKILL.md / TASK.md → use its directory.
         if p.suffix in (".yaml", ".yml"):
             return _load_config(p.parent, p, instruction, task)
         p = p.parent
@@ -44,7 +52,7 @@ def load_spec(path: str, instruction: str | None = None, task: str | None = None
         cfg = p / name
         if cfg.is_file():
             return _load_config(p, cfg, instruction, task)
-    return _load_skill_folder(p, instruction)
+    return _load_convention_folder(p, instruction)
 
 
 # --------------------------------------------------------------------------- SkillsBench task
@@ -90,16 +98,16 @@ def _load_skillsbench_task(d: Path, instruction: str | None) -> EvalSpec:
 
 
 def _load_config(d: Path, cfg_path: Path, instruction: str | None, task: str | None) -> EvalSpec:
-    """Load a generic task from ``adarubric.yaml`` or a skillgrade-style ``eval.yaml``.
+    """Load a generic task from ``adarubric.yaml`` or an ``eval.yaml``.
 
-    Supported (both shapes; skillgrade compat reads defaults + tasks[]):
+    Supported (both shapes; a ``defaults`` + ``tasks[]`` layout is also accepted):
       instruction, workspace (list of "src" or "src:dest"), docker: {base, setup}, timeout, skill.
     Grader definitions are carried later (Step 2); here we only read what running needs.
     """
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
     defaults = raw.get("defaults") or {}
 
-    # skillgrade shape: pick the named task, else the first.
+    # defaults + tasks[] shape: pick the named task, else the first.
     task_def: dict = {}
     tasks = raw.get("tasks")
     if isinstance(tasks, list) and tasks:
@@ -143,21 +151,8 @@ def _load_config(d: Path, cfg_path: Path, instruction: str | None, task: str | N
     if not skill_paths:
         raise ValueError(f"No skill found for {cfg_path} — add a `skill:` path or a SKILL.md.")
 
-    # Graders (compact "all-in-one" shape, option B): tasks[].graders or top-level graders.
-    graders: list[GraderSpec] = []
-    for g in (task_def.get("graders") or raw.get("graders") or []):
-        if not isinstance(g, dict):
-            continue
-        graders.append(
-            GraderSpec(
-                type=str(g.get("type", "deterministic")),
-                command=g.get("run") or g.get("command"),
-                rubric=g.get("rubric"),
-                model=g.get("model"),
-                provider=g.get("provider"),
-                weight=float(g.get("weight", 1.0)),
-            )
-        )
+    # Graders (compact all-in-one shape): tasks[].graders or top-level graders.
+    graders = _parse_graders(task_def.get("graders") or raw.get("graders") or [])
 
     spec = EvalSpec(
         name=str(name),
@@ -174,16 +169,16 @@ def _load_config(d: Path, cfg_path: Path, instruction: str | None, task: str | N
     return spec
 
 
-# --------------------------------------------------------------------------- plain skill folder
+# --------------------------------------------------------------------------- convention folder
 
 
-def _load_skill_folder(d: Path, instruction: str | None) -> EvalSpec:
-    if instruction is None:
-        raise ValueError(
-            "An instruction is required when running a plain skill folder "
-            "(pass --instruction / the `instruction` argument)."
-        )
+def _load_convention_folder(d: Path, instruction: str | None) -> EvalSpec:
+    """The default generic shape: a ``SKILL.md`` skill + optional ``TASK.md`` + optional ``grader.yaml``.
 
+    Instruction resolution: ``--instruction`` > ``TASK.md`` (frontmatter stripped) > error.
+    Graders: parsed from ``grader.yaml`` if present, else none (ungraded run).
+    The control files (``TASK.md`` / ``grader.yaml``) are stripped from the skill at injection time.
+    """
     skill_paths, name = _detect_skills(d)
     if not skill_paths:
         raise ValueError(
@@ -191,7 +186,55 @@ def _load_skill_folder(d: Path, instruction: str | None) -> EvalSpec:
             f"skills/, .claude/skills/, .agents/skills/."
         )
 
-    return EvalSpec(name=name, instruction=instruction, skill_paths=skill_paths)
+    task_md = d / "TASK.md"
+    if instruction is not None:
+        instr = instruction
+    elif task_md.is_file():
+        instr = _strip_frontmatter(task_md.read_text(encoding="utf-8")).strip()
+    else:
+        raise ValueError(
+            f"No instruction for {d} — add a TASK.md, an adarubric.yaml, or pass --instruction."
+        )
+    if not instr:
+        raise ValueError(f"TASK.md in {d} is empty — provide an instruction.")
+
+    return EvalSpec(
+        name=name, instruction=instr, mode="generic",
+        skill_paths=skill_paths, graders=_load_grader_file(d),
+    )
+
+
+# --------------------------------------------------------------------------- graders (shared)
+
+
+def _load_grader_file(d: Path) -> list[GraderSpec]:
+    """Parse ``grader.yaml``/``grader.yml`` at the folder root into graders (empty if absent)."""
+    for name in _GRADER_FILES:
+        gp = d / name
+        if gp.is_file():
+            raw = yaml.safe_load(gp.read_text(encoding="utf-8")) or {}
+            items = raw.get("graders") if isinstance(raw, dict) else raw
+            return _parse_graders(items or [])
+    return []
+
+
+def _parse_graders(items: object) -> list[GraderSpec]:
+    """Normalize a list of grader dicts into :class:`GraderSpec`s (``run`` or ``command`` accepted)."""
+    graders: list[GraderSpec] = []
+    for g in items if isinstance(items, list) else []:
+        if not isinstance(g, dict):
+            continue
+        graders.append(
+            GraderSpec(
+                type=str(g.get("type", "deterministic")),
+                command=g.get("run") or g.get("command"),
+                rubric=g.get("rubric"),
+                model=g.get("model"),
+                provider=g.get("provider"),
+                weight=float(g.get("weight", 1.0)),
+            )
+        )
+    return graders
 
 
 def _detect_skills(d: Path) -> tuple[list[str], str]:

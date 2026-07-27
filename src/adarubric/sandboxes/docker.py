@@ -4,8 +4,8 @@ Two build paths (one image per task × harness, layer-cached across attempts):
   * **skillbench** — build the task's own ``environment/Dockerfile`` (context = ``environment/``),
     exactly as SkillsBench intends (assets staged at their real paths, deps installed), then an
     overlay layer installs the harness CLI.
-  * **generic** — synthesize a Dockerfile from ``docker_base`` (+ optional ``docker_setup``,
-    skillgrade-style), then the same harness overlay.
+  * **generic** — synthesize a Dockerfile from ``docker_base`` (+ optional ``docker_setup``),
+    then the same harness overlay.
 
 Per attempt: fresh container → stage generic workspace files → write the prompt file → inject
 skills into the container **HOME** per the harness's ``skill_dirs`` (``/root/.claude/skills`` …,
@@ -22,7 +22,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-from adarubric.core.contracts import PROMPT_RELPATH, Harness, Sandbox
+from adarubric.core.contracts import PROMPT_RELPATH, SKILL_INJECT_IGNORE, Harness, Sandbox
 from adarubric.core.models import EvalSpec, ShellResult
 
 _HOME = "/root"
@@ -170,6 +170,9 @@ class DockerSandbox(Sandbox):
                 sp = Path(spath)
                 if sp.is_dir():
                     _docker("cp", str(sp), f"{cid}:{base}/")
+                    # Strip AdaRubric control files from the injected skill (grader/task never leak).
+                    victims = " ".join(f"'{base}/{sp.name}/{n}'" for n in SKILL_INJECT_IGNORE)
+                    _docker("exec", cid, "sh", "-c", f"rm -rf {victims}")
 
         return cid
 

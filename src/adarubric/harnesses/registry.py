@@ -1,7 +1,6 @@
 """Harness registry — maps a harness name to its implementation.
 
 The plugin seam for coding agents: a new harness is a new module here + one line in ``_REGISTRY``.
-Ported from skillgrade `src/agents/registry.ts`.
 """
 
 from __future__ import annotations

@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from adarubric.core.contracts import PROMPT_RELPATH, Harness, Sandbox
+from adarubric.core.contracts import PROMPT_RELPATH, SKILL_INJECT_IGNORE, Harness, Sandbox
 from adarubric.core.models import EvalSpec, ShellResult
 
 
@@ -52,7 +52,9 @@ class LocalSandbox(Sandbox):
             for spath in spec.skill_paths:
                 sp = Path(spath)
                 if sp.is_dir():
-                    shutil.copytree(sp, base / sp.name, dirs_exist_ok=True)
+                    # Strip AdaRubric control files so the grader/task never leak into the skill.
+                    shutil.copytree(sp, base / sp.name, dirs_exist_ok=True,
+                                    ignore=shutil.ignore_patterns(*SKILL_INJECT_IGNORE))
 
         return workspace
 

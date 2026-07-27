@@ -42,15 +42,18 @@ def run(
         ...,
         "--harness",
         help="Harness(es) to test, comma-separated: claude-code | gemini-cli | codex. "
-        "Explicit - no auto-detection. Multiple runs the same task on each.",
+        "Explicit - no auto-detection. Multiple runs the same task on each. Pin a model per "
+        "harness with 'name:model', e.g. 'claude-code:claude-opus-4-8,codex:gpt-5-codex' "
+        "(falls back to --model, else the CLI's own default).",
     ),
     sandbox: str = typer.Option(
         "local", "--sandbox", help="Where to run: local | docker."
     ),
     model: str = typer.Option(
         None, "--model",
-        help="Pin the harness model (e.g. claude-opus-4-8, gpt-5-codex, gemini-2.5-pro). "
-        "Passed to the CLI as --model/-m; recorded in eval.yaml. Omit to use the CLI's own default.",
+        help="Default model for all harnesses (e.g. claude-opus-4-8, gpt-5-codex, gemini-2.5-pro). "
+        "Overridden per harness by 'name:model' in --harness. Passed to the CLI as --model/-m and "
+        "recorded in eval.yaml. Omit to use each CLI's own default.",
     ),
     dataset: str = typer.Option(
         "auto",
@@ -103,7 +106,8 @@ def run(
     from adarubric.sandboxes.registry import create_sandbox
 
     file_env = _load_env_file(env_file) if env_file else {}
-    harness_names = [h.strip() for h in harness.split(",") if h.strip()]
+    # Each entry is "name" or "name:model"; a per-harness model overrides the global --model.
+    harness_specs = _parse_harness_specs(harness, model)
 
     spec = load_spec(path, instruction, task=task)
 
@@ -127,14 +131,12 @@ def run(
     if timeout is not None:  # explicit flag wins over config-file value
         spec.timeout_sec = timeout
     graders = "skillbench-verifier" if spec.mode == "skillbench" else f"{len(spec.graders)} grader(s)"
-    typer.echo(
-        f"mode={spec.mode}  sandbox={sandbox}  task={spec.name}  "
-        f"model={model or 'default'}  grade={grade} ({graders})"
-    )
+    typer.echo(f"mode={spec.mode}  sandbox={sandbox}  task={spec.name}  grade={grade} ({graders})")
     reporter = TerminalReporter()
 
-    for hname in harness_names:
-        h = create_harness(hname, model=model)
+    for hname, hmodel in harness_specs:
+        h = create_harness(hname, model=hmodel)
+        typer.echo(f"harness={hname}  model={hmodel or 'default (CLI decides)'}")
         # Fail fast if the harness's declared key isn't available (env or --env-file).
         missing = [k for k in h.env_keys if not (os.environ.get(k) or file_env.get(k))]
         if missing:
@@ -156,14 +158,33 @@ def run(
             u = m.usage
             cost = u.cost_usd if u.cost_usd is not None else u.estimated_cost_usd
             reward = f"reward={tr.reward:.2f}" if tr.graded else "ungraded"
+            turns = u.num_turns if u.num_turns is not None else "?"
             typer.echo(
                 f"    -> {tr.output_dir}\n"
-                f"       success={m.success} {reward} tokens={u.total_tokens} "
+                f"       success={m.success} {reward} turns={turns} tokens={u.total_tokens} "
                 f"cost={_fmt_cost(cost)} ({u.cost_source}) "
                 f"time={m.timing.total_ms / 1000:.1f}s "
                 f"changes=+{m.files_created}/~{m.files_modified}/-{m.files_deleted}"
             )
     typer.echo("done.")
+
+
+def _parse_harness_specs(harness: str, default_model: str | None) -> list[tuple[str, str | None]]:
+    """Parse ``--harness`` into ``[(name, model), ...]``.
+
+    Each comma-separated entry is ``name`` or ``name:model``. A per-harness ``model`` wins; otherwise
+    the entry inherits the global ``--model`` (``default_model``), which may itself be ``None`` (let
+    the CLI decide). Harness names never contain ``:``, so splitting on the first colon is safe.
+    """
+    specs: list[tuple[str, str | None]] = []
+    for entry in harness.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        name, sep, hmodel = entry.partition(":")
+        hmodel = hmodel.strip()
+        specs.append((name.strip(), hmodel if (sep and hmodel) else default_model))
+    return specs
 
 
 def _fmt_cost(cost: float | None) -> str:

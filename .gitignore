@@ -30,6 +30,9 @@ results/
 output*/
 *.log
 
+# Generated dashboard report (built from output/ by dashboard/generate.py; template.html is tracked)
+dashboard/report.html
+
 # Cloned datasets (large; not part of the repo)
 dataset/
 

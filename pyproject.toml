@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "adarubric"
 version = "0.1.0"
-description = "Evaluate how coding agents discover and use Agent Skills (Python port of skillgrade)."
+description = "Evaluate how coding agents discover and use Agent Skills."
 readme = "ReadMe.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

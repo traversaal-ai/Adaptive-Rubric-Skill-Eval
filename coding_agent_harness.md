@@ -64,6 +64,16 @@ uv run adarubric run <task> --harness claude-code,codex,gemini-cli --sandbox doc
 The chosen harness's env key(s) must be present (in the environment or `--env-file`) or the run fails
 fast. Only that harness's declared key is injected into the sandbox — never the whole environment.
 
+### Verification status (be honest about what's been run)
+
+| Harness | End-to-end verified? | Notes |
+|---------|----------------------|-------|
+| **claude-code** | ✅ Yes — local **and** Docker, real runs | Richest signal: definitive `skill_opened`, reported cost. |
+| **codex** | ✅ Yes — local real run | `skill_opened` partial (file-read/marker evidence); CLI reports no cost (estimated). |
+| **gemini-cli** | ⚠️ **Not yet run end-to-end** | Adapter + Docker install are written and the CLI is installed, but no live run has confirmed the output shape. `skill_opened` is `None` **by design** (the `-o json` output exposes no per-tool trajectory to parse) — *and* the adapter is **unverified** until a real run happens. Treat gemini results as provisional. |
+
+So the `None` for gemini's `skill_opened` is two things at once: (1) a genuine limitation — its JSON gives `{response, stats}` with no tool trajectory, so there's nothing to measure; and (2) **unverified** — we haven't run gemini live to confirm the parser. Running it needs a `GEMINI_API_KEY`; do a real run before trusting its numbers.
+
 ---
 
 ## 3. Adding a new agentic harness (native CLI)
@@ -121,8 +131,7 @@ fair skill injection and metrics.
 The **[Agent Client Protocol](https://agentclientprotocol.com/)** (ACP) is a standard for
 editor/client ↔ agent communication over **JSON-RPC 2.0 on stdio**. It lets you drive *any*
 ACP-speaking agent (e.g. `gemini --acp`) without wiring a bespoke CLI parser — the protocol gives you
-a structured session with text updates and tool-call notifications. The reference for the shape is
-skillgrade's `src/agents/acp.ts`.
+a structured session with text updates and tool-call notifications.
 
 An ACP harness differs from a native-CLI harness: instead of one `run_command(... < prompt)` call, it
 spawns the agent as a **long-lived subprocess** and speaks the protocol to it. The cleanest fit for
