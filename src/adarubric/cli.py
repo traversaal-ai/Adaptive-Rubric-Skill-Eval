@@ -89,6 +89,21 @@ def run(
     env_file: str = typer.Option(
         None, "--env-file", help="Load KEY=VALUE env vars (e.g. API keys) from a file."
     ),
+    acp_cmd: str = typer.Option(
+        None, "--acp-cmd",
+        help="For --harness acp: the ACP agent launch command, e.g. 'gemini --acp'. Required for acp.",
+    ),
+    acp_env_key: str = typer.Option(
+        None, "--acp-env-key",
+        help="For --harness acp: comma-separated env var(s) the ACP agent needs (declares them so "
+        "they're injected from --env-file and checked up-front). Optional; the agent also inherits "
+        "your shell environment.",
+    ),
+    acp_skill_dir: str = typer.Option(
+        None, "--acp-skill-dir",
+        help="For --harness acp: the wrapped agent's skill-discovery dir (default '.agents/skills'). "
+        "Set it to match the agent (e.g. '.gemini/skills') for a valid skill_opened signal.",
+    ),
 ) -> None:
     """Run a skill/task on one or more harnesses inside an isolated sandbox.
 
@@ -101,6 +116,7 @@ def run(
 
     from adarubric.harnesses.registry import create_harness
     from adarubric.loading import load_spec
+    from adarubric.reporting.status import FanReporter, StatusReporter
     from adarubric.reporting.terminal import TerminalReporter
     from adarubric.runner import EvalRunner
     from adarubric.sandboxes.registry import create_sandbox
@@ -132,10 +148,32 @@ def run(
         spec.timeout_sec = timeout
     graders = "skillbench-verifier" if spec.mode == "skillbench" else f"{len(spec.graders)} grader(s)"
     typer.echo(f"mode={spec.mode}  sandbox={sandbox}  task={spec.name}  grade={grade} ({graders})")
-    reporter = TerminalReporter()
+
+    # Live status: written to <output>/status.json as the run happens (stages + activity feed), so a
+    # watching dashboard can render it live. Console + status file share one fan-out reporter.
+    import os as _os
+    status_path = _os.path.join(output, "status.json")
+    status = StatusReporter(status_path)
+    reporter = FanReporter(TerminalReporter(), status)
+    typer.echo(
+        f"live status → {status_path}  (live dashboard: python dashboard/serve.py --output {output})"
+    )
 
     for hname, hmodel in harness_specs:
         h = create_harness(hname, model=hmodel)
+        # Configure the generic ACP wrapper from its dedicated flags.
+        if hname == "acp":
+            if not acp_cmd:
+                typer.secho("--harness acp requires --acp-cmd (e.g. --acp-cmd 'gemini --acp').", fg="red")
+                raise typer.Exit(code=1)
+            if sandbox != "local":
+                typer.secho("--harness acp currently supports --sandbox local only.", fg="red")
+                raise typer.Exit(code=1)
+            h.command = acp_cmd
+            if acp_env_key:
+                h.env_keys = tuple(k.strip() for k in acp_env_key.split(",") if k.strip())
+            if acp_skill_dir:
+                h.skill_dirs = tuple(d.strip() for d in acp_skill_dir.split(",") if d.strip())
         typer.echo(f"harness={hname}  model={hmodel or 'default (CLI decides)'}")
         # Fail fast if the harness's declared key isn't available (env or --env-file).
         missing = [k for k in h.env_keys if not (os.environ.get(k) or file_env.get(k))]
@@ -148,9 +186,13 @@ def run(
             raise typer.Exit(code=1)
 
         sb = create_sandbox(sandbox)
+        sb.activity = status.note  # sandbox reports build/copy/exec steps into the live feed
         runner = EvalRunner(sb, output_root=output, reporter=reporter, grade=grade)
         # Inject ONLY this harness's declared key(s) from the file into the sandbox.
         harness_env = {k: file_env[k] for k in h.env_keys if k in file_env}
+        if hname == "acp":
+            # ACP is spawned directly (not via run_command), so hand it the injected keys explicitly.
+            h.launch_env = harness_env
 
         report = runner.run(h, spec, trials=trials, env=harness_env)
         for tr in report.trials:
@@ -166,6 +208,7 @@ def run(
                 f"time={m.timing.total_ms / 1000:.1f}s "
                 f"changes=+{m.files_created}/~{m.files_modified}/-{m.files_deleted}"
             )
+    status.close()
     typer.echo("done.")
 
 

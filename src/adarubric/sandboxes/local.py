@@ -24,6 +24,7 @@ class LocalSandbox(Sandbox):
     def setup(self, spec: EvalSpec, harness: Harness, env: dict[str, str] | None = None) -> str:
         workspace = tempfile.mkdtemp(prefix="adarubric-")
         root = Path(workspace)
+        self._note(f"created local workspace {workspace}")
 
         # 1. Copy the task's workspace inputs in (plain files → basename; map → explicit dest).
         staging = {f: Path(f).name for f in spec.workspace_files}
@@ -52,6 +53,7 @@ class LocalSandbox(Sandbox):
             for spath in spec.skill_paths:
                 sp = Path(spath)
                 if sp.is_dir():
+                    self._note(f"inject skill '{sp.name}' → {discovery}/ (control files stripped)")
                     # Strip AdaRubric control files so the grader/task never leak into the skill.
                     shutil.copytree(sp, base / sp.name, dirs_exist_ok=True,
                                     ignore=shutil.ignore_patterns(*SKILL_INJECT_IGNORE))

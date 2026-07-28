@@ -153,7 +153,8 @@ the skill is injected, so the agent never sees the task's grading.
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `<path>` | — | A skill folder or a SkillsBench task package. |
-| `--harness` | *(required)* | `claude-code` \| `gemini-cli` \| `codex`, comma-separated for a matrix run. Explicit — **no key auto-detection**. Pin a model per harness with `name:model` (e.g. `claude-code:claude-opus-4-8,codex:gpt-5-codex`). |
+| `--harness` | *(required)* | `claude-code` \| `gemini-cli` \| `codex` \| `acp` (generic ACP wrapper, needs `--acp-cmd`), comma-separated for a matrix run. Explicit — **no key auto-detection**. Pin a model per harness with `name:model` (e.g. `claude-code:claude-opus-4-8,codex:gpt-5-codex`). |
+| `--acp-cmd` / `--acp-skill-dir` / `--acp-env-key` | — | For `--harness acp`: the agent launch command (e.g. `'gemini --acp'`), the wrapped agent's skill dir, and its required env var(s). `--sandbox local` only for now. |
 | `--sandbox` | `local` | `local` (OS temp dir) or `docker` (isolated container; required for faithful SkillsBench runs). |
 | `--model` | *(CLI default)* | Default model for **all** harnesses (e.g. `claude-opus-4-8`). Overridden per harness by `name:model` in `--harness`. Recorded in `eval.yaml`. |
 | `--dataset` | `auto` | `auto` detects the shape; `skillbench` / `generic` validate or force a pipeline. |
@@ -213,9 +214,9 @@ stdin redirection (`cli … < .adarubric/prompt.md`) — cross-platform, contain
 AdaRubric-Skill-Eval/
   ReadMe.md
   coding_agent_harness.md        how the harnesses work + how to add your own (incl. ACP)  ← start here for harnesses
-  dashboard/                     the run-tracker UI (outside the package)
-    template.html                self-contained dashboard (charts/logs/cost); sample data when opened directly
-    generate.py                  scans output/ → writes a standalone report.html
+  dashboard/                     the live run-tracker UI (outside the package)
+    serve.py                     `python dashboard/serve.py` → live dashboard on http://localhost:8765
+    dashboard.html               the page (charts/logs/cost, per-task/run pages); polls /api/data
   pyproject.toml                 Typer + uv; console script `adarubric`
   src/adarubric/
     cli.py                       Typer app (thin edge — parse flags, delegate)
@@ -292,13 +293,23 @@ Its observability differs per harness (Claude Code: definitive; Codex: partial; 
 
 ## Harnesses
 
-Claude Code, Gemini CLI, and Codex are built in. To use them, add your own, or attach an
-**ACP-compatible** agent, see **[`coding_agent_harness.md`](coding_agent_harness.md)**.
+Claude Code, Gemini CLI, and Codex are built in. A **generic ACP harness** (`--harness acp`) runs
+**any** [Agent Client Protocol](https://agentclientprotocol.com/) agent (Zed agents, `gemini --acp`,
+and others) with no per-agent code — point it at a launch command:
+
+```bash
+uv run adarubric run <task> --harness acp --acp-cmd 'gemini --acp' \
+    --acp-skill-dir '.gemini/skills' --sandbox local --env-file .env
+```
+
+(ACP is `--sandbox local` only for now; a Docker bridge is a follow-up.) To use the built-ins, add
+your own adapter, or wire another ACP agent, see **[`coding_agent_harness.md`](coding_agent_harness.md)**.
 
 **Verified so far:** claude-code (local + Docker) and codex (local) have real end-to-end runs.
-**gemini-cli is not yet run live** — its adapter is written but unverified, and its `skill_opened`
-is `None` by design (its output exposes no per-tool trajectory). See the verification table in
-[`coding_agent_harness.md`](coding_agent_harness.md) before trusting gemini numbers.
+**gemini-cli** was run once (Docker) which surfaced a headless folder-trust bug (exit 55) — now fixed
+(`GEMINI_CLI_TRUST_WORKSPACE=true`); re-run to confirm a clean success. Its `skill_opened` is now
+**measured** from `gemini -o json`'s complete tool tally (`stats.tools.byName` → `activate_skill`),
+not a design gap. See the verification table in [`coding_agent_harness.md`](coding_agent_harness.md).
 
 ---
 
@@ -321,29 +332,42 @@ While a run happens, [src/adarubric/reporting/terminal.py](src/adarubric/reporti
 The final per-trial summary (score, tokens, cost, time, file changes) is printed by
 [cli.py](src/adarubric/cli.py). This stays in-package because the CLI imports it at runtime.
 
-### 2. The dashboard (after runs) — [`dashboard/`](dashboard/)
+### 2. The dashboard — one live server on a port — [`dashboard/`](dashboard/)
 
-A **self-contained HTML run tracker** — accuracy, cost, tokens, skill-usage, and per-run logs, with
-charts. It lives **outside `src/`** (top-level `dashboard/`) and reads the `output/` tree:
+One command, one live dashboard. Every `adarubric run` writes `output/status.json` as it happens
+(stages + a "what the sandbox is doing" activity feed); the dashboard server scans `output/` on every
+request and the page polls it, so you watch docker build, files copied to the container, the current
+stage, accuracy, turns, cost, and each trial finishing **live**.
 
 ```bash
-python dashboard/generate.py --output output      # → dashboard/report.html (open in any browser)
+# terminal 1 — run
+uv run adarubric run <task> --harness gemini-cli --dataset skillbench --sandbox docker --env-file .env
+
+# terminal 2 — start the live dashboard (opens your browser at http://127.0.0.1:8765)
+python dashboard/serve.py --output output
 ```
 
-- **[dashboard/template.html](dashboard/template.html)** — the UI (inline CSS/JS, no dependencies,
-  theme-aware). Opened directly it shows sample data, so it doubles as a preview.
-- **[dashboard/generate.py](dashboard/generate.py)** — scans `output/<harness>/<task>/attempt-*/…`,
-  embeds every run's metrics into the template, and writes a **single offline `report.html`** (no
-  server, no network). Handles both the `attempt-N/trial-T/` and older `attempt-N/` layouts.
+The page polls `/api/data` (a fresh scan of `output/`) every ~2s and re-renders **in place** — no
+reload, no dummy data — keeping your scroll position and whatever task/run page you're on.
+
+- **[dashboard/serve.py](dashboard/serve.py)** — the server: scans `output/` (handles both the
+  `attempt-N/trial-T/` and older `attempt-N/` layouts) and serves the page + the live `/api/data`.
+  Stdlib only, localhost-only by default (`--host`/`--port`/`--no-open` to change).
+- **[dashboard/dashboard.html](dashboard/dashboard.html)** — the UI (inline CSS/JS, no dependencies,
+  theme-aware); starts empty and fills in from `/api/data`.
 
 What it shows: KPI strip (runs, mean reward, skill-opened rate, total cost, total tokens),
 per-harness bar charts (mean reward, **mean turns-to-answer**, total cost, total tokens), and a
-filterable runs table with a **Turns** column. Click any past run to expand its full detail:
-turns / tool calls / commands, tool breakdown, tokens, cost, reward + skill-usage, the **created /
-modified / deleted file lists**, and the `raw.log` excerpt.
+filterable runs table with a **Turns** column.
 
-> The reporter (live) stays under `src/adarubric/` because it's imported at runtime; the dashboard
-> (post-run report generator) is a standalone tool, so it lives outside the package in `dashboard/`.
+**Dedicated pages (click-through):** click a **run row** to open its own page — status, all metrics
+(turns / tool calls / commands, tokens, cost, reward + skill-usage), the **created / modified /
+deleted file lists**, a **"built / copied to docker / staged" activity timeline** for that run, and
+the `raw.log` excerpt; if it's still running, a live stage strip. Click a **task name** to open the
+task page listing every run/trial of that task (live + finished). Client-side routed via the URL hash.
+
+> The live *reporter* stays under `src/adarubric/` (the runner imports it at runtime to write
+> `status.json`); the *dashboard* that reads it is a standalone tool, so it lives outside the package.
 
 ---
 

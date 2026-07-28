@@ -31,11 +31,34 @@ callback the active sandbox supplies.
 
 ## 2. Built-in harnesses
 
-| Harness | `--harness` | CLI | Env key | Skill dir | `skill_opened` observability |
+| Harness | `--harness` | CLI | Env key | Skill dir(s) we inject | `skill_opened` observability |
 |---------|-------------|-----|---------|-----------|------------------------------|
 | Claude Code | `claude-code` | `claude` | `ANTHROPIC_API_KEY` | `.claude/skills` | **Full** — `stream-json` trajectory shows the `Skill(...)` tool call and skill-file reads → definitive `True`/`False`. |
-| Gemini CLI | `gemini-cli` | `gemini` | `GEMINI_API_KEY` | `.gemini/skills` | **None yet** — no per-tool trajectory exposed → honest `None` (unknown). |
+| Gemini CLI | `gemini-cli` | `gemini` | `GEMINI_API_KEY` | `.gemini/skills`, `.agents/skills` | **Measured** — `gemini -o json` reports `stats.tools.byName`, a *complete* per-tool tally. An `activate_skill` entry → definitive `True`; a tools block without it → `False`; no tools block (older CLI) → `None`. |
 | Codex | `codex` | `codex` | `OPENAI_API_KEY` | `.agents/skills` | **Partial** — skills are injected as `<skill>` prompt fragments (invisible); we detect explicit file reads / markers → `True` on evidence, else `None`. |
+
+### Skill discovery — verified paths (the "does the agent find the skill?" question)
+
+Discovery dirs confirmed against each harness's own docs — the injected skill lands where the harness
+actually looks, so the skill is genuinely discoverable and `skill_opened` is a fair signal:
+
+| Harness | Official discovery dirs | We inject into (local = workspace root · docker = container `$HOME=/root`) |
+|---------|-------------------------|----------------------------------------------------------------------------|
+| claude-code | `<project>/.claude/skills/`, `~/.claude/skills/` | `.claude/skills` · `/root/.claude/skills` |
+| codex | `.agents/skills/` (walked to repo root), `~/.agents/skills/` | `.agents/skills` · `/root/.agents/skills` |
+| gemini-cli | `.gemini/skills/` **or `.agents/skills/` alias**, `~/.gemini/skills/` | `.gemini/skills` + `.agents/skills` · `/root/.gemini/skills` + `/root/.agents/skills` |
+
+Sources: claude-code & codex paths from SkillsBench's source-level audit
+(`dataset/skillsbench/docs/harnesses/skill-invocation-surfaces.md`); gemini-cli paths from
+[google-gemini/gemini-cli `docs/cli/using-agent-skills.md`](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/using-agent-skills.md)
+(*"User: `~/.gemini/skills/` or the `~/.agents/skills/` alias; Workspace: `.gemini/skills/` or the
+`.agents/skills/` alias"*).
+
+> **Gemini `skill_opened` is now measured** from `stats.tools.byName` in `gemini -o json` — the
+> `activate_skill` tool call is the definitive signal, and because the tally is complete, its absence
+> means the skill genuinely wasn't activated (`False`, not a guessed `None`). (Gemini's OTel
+> `--telemetry-outfile` `gemini_cli.tool_call` events are an even richer source with per-call args, if
+> deeper per-skill attribution is ever needed.)
 
 ### How each is invoked
 
@@ -70,9 +93,9 @@ fast. Only that harness's declared key is injected into the sandbox — never th
 |---------|----------------------|-------|
 | **claude-code** | ✅ Yes — local **and** Docker, real runs | Richest signal: definitive `skill_opened`, reported cost. |
 | **codex** | ✅ Yes — local real run | `skill_opened` partial (file-read/marker evidence); CLI reports no cost (estimated). |
-| **gemini-cli** | ⚠️ **Not yet run end-to-end** | Adapter + Docker install are written and the CLI is installed, but no live run has confirmed the output shape. `skill_opened` is `None` **by design** (the `-o json` output exposes no per-tool trajectory to parse) — *and* the adapter is **unverified** until a real run happens. Treat gemini results as provisional. |
+| **gemini-cli** | 🟡 **Adapter complete; re-run to confirm live** | First real run (Docker, 3 trials) failed with **exit 55** (gemini refuses `-y` in an "untrusted" folder) — fixed with `GEMINI_CLI_TRUST_WORKSPACE=true`. `skill_opened` is now **measured** from `stats.tools.byName` (`activate_skill` → `True`/`False`/`None`). Discovery paths verified. A fresh run is needed only to confirm a clean end-to-end success with these fixes. |
 
-So the `None` for gemini's `skill_opened` is two things at once: (1) a genuine limitation — its JSON gives `{response, stats}` with no tool trajectory, so there's nothing to measure; and (2) **unverified** — we haven't run gemini live to confirm the parser. Running it needs a `GEMINI_API_KEY`; do a real run before trusting its numbers.
+The gemini story: its adapter had a real headless bug (folder-trust → exit 55, now fixed), and `skill_opened` is now measured from the complete `stats.tools.byName` tally — no longer a design gap. **Re-run gemini** to confirm a clean success end-to-end with both fixes in place.
 
 ---
 
@@ -126,7 +149,29 @@ fair skill injection and metrics.
 
 ---
 
-## 4. Attaching an ACP-compatible harness
+## 4. The generic ACP harness (`--harness acp`) — built in
+
+> **This is now shipped** as [`src/adarubric/harnesses/acp.py`](src/adarubric/harnesses/acp.py) — a
+> dependency-free ACP client (no SDK). Use it to run **any** ACP-speaking agent without writing code:
+>
+> ```bash
+> uv run adarubric run <task> \
+>     --harness acp \
+>     --acp-cmd 'gemini --acp' \            # the ACP agent launch command (required)
+>     --acp-skill-dir '.gemini/skills' \    # the wrapped agent's skill dir (for a valid skill_opened)
+>     --acp-env-key GEMINI_API_KEY \        # optional: declare its key (fail-fast + --env-file inject)
+>     --sandbox local --env-file .env
+> ```
+>
+> **Scope (first cut):** `--sandbox local` only — ACP needs an interactive stdio session, so the
+> agent is spawned directly in the workspace (a Docker `docker exec -i` bridge is the follow-up).
+> **`skill_opened`:** measured from the tool-call stream (a `skill`-titled tool or a `.../skills/…`
+> path in a tool call) → `True` on evidence, else `None` (generic agents vary in how skills surface,
+> so we don't claim a definitive `False`). Verified end-to-end against a mock ACP agent
+> (`tests/test_acp_harness.py`); confirm against your specific agent, as real agents may differ in
+> edge details. So z.ai / IBM / Zed / any ACP agent works today via `--acp-cmd`.
+
+The rest of this section explains the protocol the adapter implements, for reference / extension.
 
 The **[Agent Client Protocol](https://agentclientprotocol.com/)** (ACP) is a standard for
 editor/client ↔ agent communication over **JSON-RPC 2.0 on stdio**. It lets you drive *any*
@@ -147,7 +192,10 @@ to the agent process inside the sandbox.
 2. **Create `src/adarubric/harnesses/acp.py`** with an `AcpHarness(Harness)` that carries a
    `command` (how to start the ACP agent, e.g. `"gemini --acp"`) alongside the usual `name` / `cli` /
    `env_keys` / `skill_dirs`. Accept the start command via the constructor so one adapter serves many
-   ACP agents.
+   ACP agents. **Set `skill_dirs` to match the *wrapped* agent's real discovery dirs** — an ACP
+   harness fronting gemini must use `.gemini/skills`, one fronting a claude-based agent `.claude/skills`,
+   etc. (see the verified-paths table in §2). Getting this wrong makes the skill undiscoverable and
+   `skill_opened` meaningless — it's the single most important field to get right.
 
 3. **In `run()`, drive the protocol instead of a one-shot command:**
    - **Spawn** the ACP agent process in the workspace (cwd = the sandbox workspace).

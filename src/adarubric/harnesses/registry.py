@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Callable
 
 from adarubric.core.contracts import Harness
+from adarubric.harnesses.acp import AcpHarness
 from adarubric.harnesses.claude import ClaudeHarness
 from adarubric.harnesses.codex import CodexHarness
 from adarubric.harnesses.gemini import GeminiHarness
@@ -16,7 +17,9 @@ _REGISTRY: dict[str, Callable[[], Harness]] = {
     "claude-code": ClaudeHarness,
     "gemini-cli": GeminiHarness,
     "codex": CodexHarness,
-    # "acp" and "opencode" are registered in a later piece.
+    # Generic ACP wrapper — drives any Agent Client Protocol agent (configure with --acp-cmd).
+    "acp": AcpHarness,
+    # "opencode" is registered in a later piece.
 }
 
 

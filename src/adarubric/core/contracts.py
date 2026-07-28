@@ -13,7 +13,7 @@ Imports only the data models — never an adapter.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Protocol
+from typing import Callable, Protocol
 
 from adarubric.core.models import (
     EvalSpec,
@@ -99,6 +99,19 @@ class Sandbox(ABC):
 
     #: Registry name, e.g. "local" / "docker".
     name: str = ""
+    #: Optional live-activity sink, set by the CLI (to the StatusReporter's ``note``). Lets a sandbox
+    #: report what it's doing — building the image, copying files, running container commands — to a
+    #: live dashboard. ``None`` → a no-op; the sandbox never depends on it being set.
+    activity: "Callable[[str], None] | None" = None
+
+    def _note(self, msg: str) -> None:
+        """Emit a live activity line if a sink is attached (safe no-op otherwise)."""
+        cb = self.activity
+        if cb is not None:
+            try:
+                cb(msg)
+            except Exception:  # noqa: BLE001 - activity reporting must never break a run
+                pass
 
     def prepare(
         self, spec: EvalSpec, harness: "Harness", env: dict[str, str] | None = None

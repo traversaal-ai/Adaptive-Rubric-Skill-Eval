@@ -83,11 +83,13 @@ class DockerSandbox(Sandbox):
         if spec.mode == "skillbench" and spec.dockerfile:
             base_tag = f"adarubric/{_slug(spec.name)}:task"
             context = str(Path(spec.dockerfile).parent)  # environment/ — COPY paths resolve here
+            self._note(f"building task image from {spec.dockerfile} (this can take a few minutes)…")
             res = _docker("build", "-t", base_tag, "-f", spec.dockerfile, context)
             if res.exit_code != 0:
                 raise RuntimeError(f"docker build (task) failed:\n{res.stderr[-3000:]}")
         else:
             base_tag = f"adarubric/{_slug(spec.name)}:task"
+            self._note(f"building base image FROM {spec.docker_base or _DEFAULT_BASE}…")
             lines = [f"FROM {spec.docker_base or _DEFAULT_BASE}",
                      "ENV DEBIAN_FRONTEND=noninteractive"]
             if spec.docker_setup:
@@ -103,12 +105,14 @@ class DockerSandbox(Sandbox):
         tag = f"adarubric/{_slug(spec.name)}-{_slug(harness.name)}:latest"
         overlay = [f"FROM {base_tag}", "ENV DEBIAN_FRONTEND=noninteractive"]
         if harness.docker_install:
+            self._note(f"installing the {harness.name} CLI into the image…")
             overlay.append(f"RUN {_OVERLAY_PREREQS} || true")
             overlay.append(f"RUN {harness.docker_install}")
         overlay.append('ENV PATH="/usr/local/bin:/root/.local/bin:${PATH}"')
         res = self._build_synth(tag, "\n".join(overlay))
         if res.exit_code != 0:
             raise RuntimeError(f"docker build (harness overlay) failed:\n{res.stderr[-3000:]}")
+        self._note(f"image ready: {tag}")
 
         with self._lock:
             self._images[key] = tag
@@ -129,6 +133,7 @@ class DockerSandbox(Sandbox):
         for k, v in (env or {}).items():
             run_args += ["-e", f"{k}={v}"]
         run_args += [image, "sh", "-c", "sleep infinity"]
+        self._note(f"starting container from {image}…")
         res = _docker(*run_args)
         if res.exit_code != 0:
             raise RuntimeError(f"docker run failed:\n{res.stderr[-2000:]}")
@@ -152,6 +157,7 @@ class DockerSandbox(Sandbox):
             dest = f"{workdir}/{dest_rel}".replace("//", "/")
             parent = dest.rsplit("/", 1)[0]
             _docker("exec", cid, "sh", "-c", f"mkdir -p '{parent}'")
+            self._note(f"copy → {dest} ({src.name})")
             _docker("cp", str(src), f"{cid}:{dest}")
 
         # Prompt file.
@@ -169,11 +175,13 @@ class DockerSandbox(Sandbox):
             for spath in spec.skill_paths:
                 sp = Path(spath)
                 if sp.is_dir():
+                    self._note(f"inject skill '{sp.name}' → {base}/ (control files stripped)")
                     _docker("cp", str(sp), f"{cid}:{base}/")
                     # Strip AdaRubric control files from the injected skill (grader/task never leak).
                     victims = " ".join(f"'{base}/{sp.name}/{n}'" for n in SKILL_INJECT_IGNORE)
                     _docker("exec", cid, "sh", "-c", f"rm -rf {victims}")
 
+        self._note("workspace ready — handing off to the agent")
         return cid
 
     def run_command(self, workspace: str, command: str, env: dict[str, str] | None = None) -> ShellResult:
@@ -222,6 +230,7 @@ class DockerSandbox(Sandbox):
 
     def stage(self, workspace: str, host_src: str, dest: str) -> None:
         # dest is an absolute container path (e.g. /verifier). Ensure parent exists, then docker cp.
+        self._note(f"staging grader → {dest} (after the agent finished)")
         parent = dest.rsplit("/", 1)[0] or "/"
         _docker("exec", workspace, "sh", "-c", f"mkdir -p '{parent}'")
         src = Path(host_src)
@@ -231,6 +240,7 @@ class DockerSandbox(Sandbox):
         _docker("cp", srcarg, f"{workspace}:{dest}")
 
     def export_workspace(self, workspace: str, dest_dir: str) -> None:
+        self._note("exporting the agent's final workspace (credentials scrubbed)…")
         dest = Path(dest_dir)
         dest.mkdir(parents=True, exist_ok=True)
         for root in self._capture_roots(workspace):
