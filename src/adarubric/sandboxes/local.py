@@ -16,6 +16,7 @@ from pathlib import Path
 
 from adarubric.core.contracts import PROMPT_RELPATH, SKILL_INJECT_IGNORE, Harness, Sandbox
 from adarubric.core.models import EvalSpec, ShellResult
+from adarubric.sandboxes.staging import normalized_source
 
 
 class LocalSandbox(Sandbox):
@@ -76,13 +77,16 @@ class LocalSandbox(Sandbox):
         return ShellResult(stdout=proc.stdout, stderr=proc.stderr, exit_code=proc.returncode)
 
     def stage(self, workspace: str, host_src: str, dest: str) -> None:
-        src = Path(host_src)
-        dst = Path(workspace) / dest.lstrip("/\\")
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if src.is_dir():
-            shutil.copytree(src, dst, dirs_exist_ok=True)
-        elif src.exists():
-            shutil.copy2(src, dst)
+        # Same CRLF normalisation as the docker sandbox: on a POSIX host, a grader checked out with
+        # Windows line endings is equally unrunnable and would look like the agent scoring zero.
+        with normalized_source(host_src) as staged_src:
+            src = Path(staged_src)
+            dst = Path(workspace) / dest.lstrip("/\\")
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if src.is_dir():
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+            elif src.exists():
+                shutil.copy2(src, dst)
 
     def export_workspace(self, workspace: str, dest_dir: str) -> None:
         dest = Path(dest_dir)

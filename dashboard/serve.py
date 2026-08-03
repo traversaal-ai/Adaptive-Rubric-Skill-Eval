@@ -115,7 +115,8 @@ def _run_record(run_json: Path, meta: dict) -> dict:
         "key": f"{harness}/{task}/attempt-{attempt}/trial-{trial}",
         "harness": harness,
         "task": task,
-        "model": meta.get("model"),
+        "model": meta.get("model"),                      # what the CLI reported actually running
+        "model_requested": meta.get("model_requested"),  # what --model asked for (may be None)
         "sandbox": meta.get("sandbox", "?"),
         "attempt": attempt,
         "trial": trial,
@@ -124,6 +125,12 @@ def _run_record(run_json: Path, meta: dict) -> dict:
         "timed_out": bool(meta.get("timed_out")),
         "graded": bool(meta.get("graded")),
         "reward": meta.get("reward") if meta.get("graded") else None,
+        # Set when grading never reached a verdict (broken check script, wrong sandbox). Rendered as
+        # its own state — NOT as a reward of zero, which would read as "the agent got it all wrong".
+        "grading_error": meta.get("grading_error"),
+        # Archival copy failed. The run is still valid and still scored — shown as a footnote, not
+        # as a failure, so a file lock can't masquerade as the agent losing.
+        "export_error": meta.get("export_error"),
         "skill_opened": skill.get("skill_opened"),
         "turns": usage.get("num_turns"),
         "tool_calls": usage.get("num_tool_calls"),
@@ -137,6 +144,10 @@ def _run_record(run_json: Path, meta: dict) -> dict:
         "cost_usd": cost if cost is not None else est,
         "cost_source": usage.get("cost_source"),
         "time_s": round(total_ms / 1000, 1) if total_ms is not None else None,
+        # ISO-8601 UTC, straight from run.json. The page renders them in the viewer's local zone —
+        # "when did this run" is unanswerable from a duration alone once you have a week of results.
+        "started_at": meta.get("started_at"),
+        "ended_at": meta.get("ended_at"),
         "changes": _changes(trial_dir / "changes.json", meta),
         "error": meta.get("error"),
         "output_dir": trial_dir.as_posix(),
@@ -151,12 +162,18 @@ def _running_record(output_root: str, t: dict) -> dict:
     attempt, trial = t.get("attempt"), t.get("trial")
     key = f"{harness}/{task}/attempt-{attempt}/trial-{trial}"
     return {
-        "key": key, "harness": harness, "task": task, "model": None, "sandbox": None,
+        "key": key, "harness": harness, "task": task, "model": None, "model_requested": None,
+        "sandbox": None,
         "attempt": attempt, "trial": trial, "running": True, "stage": t.get("stage"),
-        "success": False, "timed_out": False, "graded": False, "reward": None, "skill_opened": None,
+        "success": False, "timed_out": False, "graded": False, "reward": None,
+        "grading_error": None, "export_error": None, "skill_opened": None,
         "turns": None, "tool_calls": None, "commands": None, "tools": {},
         "tokens": {"input": None, "output": None, "total": None}, "cost_usd": None, "cost_source": None,
         "time_s": None,
+        # A live job has a real start time (from status.json) but no end time yet — the page turns
+        # that into a ticking elapsed clock rather than a blank cell.
+        "started_at": t.get("started_at"),
+        "ended_at": None,
         "changes": {"created": [], "modified": [], "deleted": [], "n_created": 0, "n_modified": 0, "n_deleted": 0},
         "error": None, "output_dir": f"{output_root}/{key}", "log_excerpt": "",
         "activity": t.get("activity", []),

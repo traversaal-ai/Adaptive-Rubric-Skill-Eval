@@ -33,9 +33,25 @@ PRICES: dict[str, ModelPrice] = {
     "claude-sonnet-4-6": ModelPrice(3.0, 15.0),
     "claude-haiku-4-5": ModelPrice(1.0, 5.0),
     "claude-fable-5": ModelPrice(10.0, 50.0),
-    # --- OpenAI / Google: fill in the models your codex / gemini-cli harnesses actually use ---
-    # "gpt-5": ModelPrice(?, ?),
-    # "gemini-3-pro": ModelPrice(?, ?),
+    # --- Google (list prices, cached 2026-08; VERIFY at ai.google.dev/pricing) ---
+    # Gemini 2.5 Pro is tiered: these are the <=200k-prompt rates. Long prompts (>200k) bill higher
+    # (~2.50/15.00), so a big-context run is UNDER-estimated here. Reported cost always wins when a
+    # harness provides one; gemini-cli does not, so every gemini figure is an estimate.
+    "gemini-2.5-pro": ModelPrice(1.25, 10.0),
+    "gemini-2.5-flash": ModelPrice(0.30, 2.50),
+    # --- OpenAI (list prices effective 2026-07-30; VERIFY at openai.com/api/pricing) ---
+    # Cached input bills at 10% of these rates and the Batch API halves them — neither is modelled
+    # here, so a cache-heavy run is OVER-estimated.
+    "gpt-5.6-sol": ModelPrice(5.0, 30.0),
+    "gpt-5.6-terra": ModelPrice(2.0, 12.0),
+    "gpt-5.6-luna": ModelPrice(0.20, 1.20),
+    # Legacy, retiring 2026-08-31. Kept so older runs still cost out; prices are the pre-5.6 rates.
+    "gpt-5.4-mini": ModelPrice(0.25, 2.0),
+    "gpt-5.4": ModelPrice(1.25, 10.0),
+    # `gpt-5-codex` is retired — the API now answers 404 "Model not found" for it. Left in place only
+    # so runs recorded before the retirement still resolve to a cost.
+    "gpt-5-codex": ModelPrice(1.25, 10.0),
+    "gpt-5": ModelPrice(1.25, 10.0),
 }
 
 

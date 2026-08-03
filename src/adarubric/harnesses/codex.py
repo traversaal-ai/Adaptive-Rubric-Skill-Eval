@@ -55,6 +55,24 @@ class CodexHarness(Harness):
         return parse_codex_jsonl(result.stdout, result.stderr)
 
 
+#: Where codex has been seen to name its model. It announces this on a session/thread event whose
+#: exact shape has moved between releases, so rather than hard-coding one path we check the handful
+#: of plausible containers. Recording the real name matters: without it a run is filed as "default"
+#: and you can no longer tell which model produced the result.
+_MODEL_CONTAINERS = ("", "item", "session", "thread", "turn", "config")
+
+
+def _find_model(ev: dict) -> str | None:
+    """Pull a model name out of one codex JSONL event, whichever shape this version uses."""
+    for key in _MODEL_CONTAINERS:
+        holder = ev if key == "" else ev.get(key)
+        if isinstance(holder, dict):
+            value = holder.get("model")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
 def parse_codex_jsonl(stdout: str, stderr: str = "") -> RunOutput:
     """Parse `codex exec --json` JSONL: item.completed (agent_message / command_execution),
     turn.completed (usage)."""
@@ -65,6 +83,7 @@ def parse_codex_jsonl(stdout: str, stderr: str = "") -> RunOutput:
     errors: list[str] = []
     in_tok = out_tok = turns = 0
     parsed_any = False
+    model: str | None = None
 
     for line in stdout.splitlines():
         line = line.strip()
@@ -77,6 +96,8 @@ def parse_codex_jsonl(stdout: str, stderr: str = "") -> RunOutput:
         parsed_any = True
         etype = ev.get("type")
         item = ev.get("item") or {}
+        if model is None:
+            model = _find_model(ev)
         if etype == "item.completed":
             itype = item.get("type")
             if itype == "agent_message" and item.get("text"):
@@ -125,6 +146,7 @@ def parse_codex_jsonl(stdout: str, stderr: str = "") -> RunOutput:
     return RunOutput(
         output="\n".join(messages).strip(),
         raw_output=stdout,
+        model=model,
         input_tokens=in_tok or None,
         output_tokens=out_tok or None,
         num_turns=turns or None,

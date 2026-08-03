@@ -74,13 +74,21 @@ def parse_gemini_output(stdout: str, stderr: str = "") -> RunOutput | None:
         return None
 
     stats = data.get("stats") or {}
-    model = None
-    in_tok = out_tok = 0
+    in_tok = out_tok = turns = 0
+    # gemini can route parts of one session through more than one model (a cheap flash model for a
+    # sub-step, say). Tokens are summed across all of them, and the reported `model` is whichever
+    # made the most API calls — so the headline name is what actually did the work, rather than
+    # whichever key happened to be first in the dict.
+    requests_by_model: dict[str, int] = {}
     for mname, mstats in (stats.get("models") or {}).items():
-        model = model or mname
         tokens = (mstats or {}).get("tokens") or {}
         in_tok += tokens.get("prompt") or tokens.get("input") or 0
         out_tok += tokens.get("candidates") or tokens.get("output") or 0
+        # One API request == one turn. gemini has no turn counter, but a round-trip to the model is
+        # exactly what "turns to answer" counts for the other harnesses.
+        requests_by_model[str(mname)] = (mstats or {}).get("api", {}).get("totalRequests") or 0
+        turns += requests_by_model[str(mname)]
+    model = max(requests_by_model, key=lambda k: requests_by_model[k]) if requests_by_model else None
 
     # Tool usage: stats.tools.byName is a COMPLETE per-tool tally for the session.
     tools = stats.get("tools")
@@ -106,6 +114,7 @@ def parse_gemini_output(stdout: str, stderr: str = "") -> RunOutput | None:
         model=model,
         input_tokens=in_tok or None,
         output_tokens=out_tok or None,
+        num_turns=turns or None,
         tools_used=sorted(tool_counts),
         tool_counts=tool_counts,
         skills_triggered=skills,

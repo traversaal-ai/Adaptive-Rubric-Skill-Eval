@@ -30,6 +30,26 @@ _PROTOCOL_VERSION = 1
 _SKILL_PATH_RE = re.compile(r"[\\/]\.(?:claude|agents|gemini|codex)[\\/]skills[\\/]([^\\/\s'\"]+)")
 
 
+def _session_model(session: dict) -> str | None:
+    """Best-effort model name from an ACP ``session/new`` response.
+
+    ACP's model-selection extension reports the session's model as ``models.currentModelId`` plus an
+    ``availableModels`` list of ``{modelId, name}``. It is optional, and wrappers differ, so this
+    stays defensive — an unknown shape yields ``None`` (honestly "unreported") rather than a guess.
+    """
+    models = session.get("models")
+    if not isinstance(models, dict):
+        return None
+    current = models.get("currentModelId") or models.get("modelId")
+    available = models.get("availableModels")
+    if isinstance(available, list):
+        for entry in available:
+            if isinstance(entry, dict) and entry.get("modelId") == current:
+                name = entry.get("name") or entry.get("modelId")
+                return str(name) if name else None
+    return str(current) if current else None
+
+
 class AcpError(Exception):
     """A protocol- or transport-level ACP failure."""
 
@@ -226,6 +246,7 @@ class AcpConnection:
         session_id = session.get("sessionId")
         if not session_id:
             raise AcpError("session/new returned no sessionId")
+        model = _session_model(session)
         result = self._request("session/prompt", {
             "sessionId": session_id,
             "prompt": [{"type": "text", "text": instruction}],
@@ -238,6 +259,7 @@ class AcpConnection:
         return RunOutput(
             output="\n".join(self._text).strip(),
             raw_output="\n".join(self._text),
+            model=model,
             tools_used=sorted(self._tools),
             tool_counts=dict(self._tools),
             skills_triggered=self._skills,

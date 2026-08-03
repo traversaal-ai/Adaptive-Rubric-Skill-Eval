@@ -113,6 +113,17 @@ class Sandbox(ABC):
             except Exception:  # noqa: BLE001 - activity reporting must never break a run
                 pass
 
+    def preflight(self) -> None:
+        """Verify this sandbox's infrastructure is usable, BEFORE any output is created.
+
+        Called once by the CLI up front. Raises
+        :class:`~adarubric.core.errors.SandboxUnavailable` with a short, actionable message when the
+        environment isn't ready (Docker daemon down, CLI missing). That aborts the run cleanly
+        instead of recording a bogus failed trial — an environment problem on *our* side is not an
+        agent failure and must never land in the results. Default: nothing to check.
+        """
+        return None
+
     def prepare(
         self, spec: EvalSpec, harness: "Harness", env: dict[str, str] | None = None
     ) -> str | None:

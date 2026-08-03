@@ -76,6 +76,11 @@ class GraderResult:
     score: float  # 0.0 - 1.0
     weight: float
     details: str = ""
+    #: Set when the grader ITSELF failed to reach a verdict (check script crashed, wrong sandbox, no
+    #: verifier present). Distinct from ``score=0.0``, which means "the answer was checked and got
+    #: nothing right". A result carrying an ``error`` is excluded from the reward average — a broken
+    #: check must never be reported as a failing agent.
+    error: str | None = None
 
 
 @dataclass
@@ -165,7 +170,14 @@ class RunMeta:
     task: str
     env_key_used: str | None = None
     harness_version: str | None = None
+    #: The model the harness actually REPORTED running (read back from its own output). This is the
+    #: ground truth for "which model produced this result" and is what reports should quote.
+    #: ``None`` means the CLI exposes no model in its output — not that no model was used.
     model: str | None = None
+    #: The model we ASKED for via ``--model`` / ``--harness name:model``. ``None`` = we pinned
+    #: nothing and let the CLI pick. Kept separate from ``model`` so a pin that silently didn't take
+    #: effect is visible instead of being papered over.
+    model_requested: str | None = None
     base_image: str | None = None  # docker only
     platform: str | None = None
     adarubric_version: str | None = None
@@ -176,8 +188,16 @@ class RunMeta:
     success: bool = False  # the RUN completed (agent finished without error/timeout)
     timed_out: bool = False
     error: str | None = None
-    graded: bool = False  # a grader ran (Step 2+)
-    reward: float = 0.0  # weighted grader score 0..1 (0 when not graded)
+    graded: bool = False  # a grader reached a VERDICT (false when grading itself broke)
+    reward: float = 0.0  # weighted grader score 0..1 (0 and meaningless when graded is false)
+    #: Why grading produced no verdict, when it didn't. ``graded=False`` + this set means "we could
+    #: not score this run", which is a different fact from "the agent scored zero" and must be
+    #: reported differently — a broken check script is our problem, not the model's.
+    grading_error: str | None = None
+    #: Set when copying the agent's files out to ``workspace/`` failed. Archival only — the run
+    #: itself still happened and is still scored, because the grader reads the live container, not
+    #: the export. A failed copy must never discard a completed run.
+    export_error: str | None = None
     # analysis
     usage: Usage = field(default_factory=Usage)
     timing: Timing = field(default_factory=Timing)

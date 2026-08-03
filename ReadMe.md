@@ -12,23 +12,36 @@ It accepts **two input shapes**:
 
 ---
 
-## Install
+## Getting started (from a fresh clone)
 
 ```bash
+git clone <this-repo> AdaRubric-Skill-Eval
+cd AdaRubric-Skill-Eval
+
+# 1. install (uv — https://docs.astral.sh/uv/)
 uv venv
 uv pip install -e ".[dev]"
+
+# 2. verify — no API keys, no Docker, no dataset needed (the suite uses fakes/mocks)
 uv run adarubric --help
-uv run pytest
+uv run pytest                       # expect: all pass, 1 skipped (the Docker test is gated)
 ```
 
-Provide the harness's API key via a `.env` file (never committed) and `--env-file`:
+That `pytest` run is your fastest confidence check that everything works. To run a **real** task you
+then need an API key (below); for a **SkillsBench** task you also need Docker + the dataset.
+
+**Provide the harness's API key** via a `.env` file (never committed) and `--env-file`:
 
 ```
 # .env  — only the key for the harness you run is injected into the sandbox
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...
-GEMINI_API_KEY=...
+ANTHROPIC_API_KEY=sk-ant-...      # claude-code
+OPENAI_API_KEY=sk-...             # codex
+GEMINI_API_KEY=...                # gemini-cli
 ```
+
+**Not included in the repo** (fetch/create these yourself): `dataset/` (clone SkillsBench — see §3),
+`.env` (your keys), `output/` (created on the first run). The live dashboard test (`--sandbox docker`
+integration) is skipped unless you set `ADARUBRIC_DOCKER_TESTS=1` and have Docker running.
 
 ---
 

@@ -34,6 +34,7 @@ import yaml
 
 from adarubric import __version__
 from adarubric.core.contracts import Harness, ProgressReporter, Sandbox
+from adarubric.core.errors import SandboxUnavailable
 from adarubric.core.models import (
     EvalReport,
     EvalSpec,
@@ -113,8 +114,18 @@ class EvalRunner:
         eval_yaml.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
 
         results: list[Trial] = []
-        for i in range(trials):
-            results.append(self._run_trial(harness, spec, attempt, i + 1, attempt_dir, env))
+        try:
+            for i in range(trials):
+                results.append(self._run_trial(harness, spec, attempt, i + 1, attempt_dir, env))
+        except SandboxUnavailable:
+            # The environment died on us (daemon stopped mid-run). Don't leave a half-written
+            # attempt behind pretending to be a result — if nothing completed, erase it entirely so
+            # the next run reuses attempt-N and the dashboard shows no phantom failure.
+            if not results:
+                import shutil
+
+                shutil.rmtree(attempt_dir, ignore_errors=True)
+            raise
 
         # Record the model(s) the harness ACTUALLY reported across the trials (the configured
         # `model` above is what we requested; this is what the CLI really ran — useful when we let
@@ -173,6 +184,8 @@ class EvalRunner:
         self._emit("stage_changed", harness.name, _safe(spec.name), attempt, TrialStage.PREPARING, trial=trial_id)
         try:
             self.sandbox.prepare(spec, harness, run_env)
+        except SandboxUnavailable:
+            raise  # our infrastructure, not the agent — never scored as a failed trial
         except Exception as exc:  # noqa: BLE001
             return self._failed_trial(harness, spec, trial_id, out_dir, started_at, transcript,
                                       str(exc), t_start, attempt)
@@ -187,12 +200,14 @@ class EvalRunner:
         export_ms: float | None = None
         timed_out = False
         error: str | None = None
+        export_error: str | None = None
         success = False
         run_output = RunOutput(output="")
         changes = WorkspaceChanges()
         grader_results: list[GraderResult] = []
         reward = 0.0
         graded = False
+        grading_error: str | None = None
 
         try:
             before = self.sandbox.list_files(workspace)
@@ -219,7 +234,16 @@ class EvalRunner:
             after = self.sandbox.list_files(workspace)
             changes = _diff(before, after)
             t = time.perf_counter()
-            self.sandbox.export_workspace(workspace, str(out_dir / "workspace"))
+            try:
+                self.sandbox.export_workspace(workspace, str(out_dir / "workspace"))
+            except Exception as xexc:  # noqa: BLE001
+                # Exporting is archival: it copies the agent's files out for later inspection. If it
+                # fails (a Windows file lock, a full disk) the RUN still happened and can still be
+                # graded — the grader reads the live container, not the export. Losing minutes of
+                # work and real API spend because a copy failed is never the right trade.
+                export_error = str(xexc)
+                self._emit("stage_changed", harness.name, _safe(spec.name), attempt,
+                           TrialStage.EXPORTING, trial=trial_id)
             export_ms = (time.perf_counter() - t) * 1000
 
             if run_output.error:
@@ -234,13 +258,26 @@ class EvalRunner:
                         try:
                             grader_results.append(
                                 create_grader(gs.type).grade(workspace, self.sandbox, gs, spec, transcript, run_env))
-                        except Exception as gexc:  # noqa: BLE001 - a grader failure is score 0, not a crash
-                            grader_results.append(GraderResult(gs.type, 0.0, gs.weight, f"grader error: {gexc}"))
-                    reward = _weighted(grader_results)
-                    graded = True
+                        except Exception as gexc:  # noqa: BLE001 - a crashing grader must not kill the run
+                            grader_results.append(GraderResult(
+                                gs.type, 0.0, gs.weight, f"grader error: {gexc}",
+                                error=f"grader crashed: {gexc}"))
+                    # Only results that reached a verdict count toward the reward. If NONE did, the
+                    # run is unscored — reporting reward 0.0 here would blame the agent for a check
+                    # script that never ran (a broken verifier, the wrong sandbox, a crash).
+                    scored = [g for g in grader_results if g.error is None]
+                    problems = [g.error for g in grader_results if g.error]
+                    grading_error = "; ".join(problems) if problems else None
+                    if scored:
+                        reward = _weighted(scored)
+                        graded = True
+                    else:
+                        reward, graded = 0.0, False
         except FuturesTimeout:
             timed_out = True
             error = f"harness timed out after {spec.timeout_sec}s"
+        except SandboxUnavailable:
+            raise  # abort the run; a dead sandbox is not an agent failure (finally still cleans up)
         except Exception as exc:  # noqa: BLE001
             error = str(exc)
         finally:
@@ -254,16 +291,20 @@ class EvalRunner:
             started_at=started_at, success=success, timed_out=timed_out, error=error,
             command_count=command_count, changes=changes,
             timing=Timing(total_ms=total_ms, setup_ms=setup_ms, run_ms=run_ms, export_ms=export_ms),
-            reward=reward, graded=graded)
+            reward=reward, graded=graded, grading_error=grading_error, export_error=export_error)
 
         raw = redact(run_output.raw_output or run_output.output or "")
         out_dir.mkdir(parents=True, exist_ok=True)
         _write_json(out_dir / "run.json", asdict(meta))
         _write_json(out_dir / "transcript.json", [asdict(e) for e in transcript])
         _write_json(out_dir / "changes.json", asdict(changes))
-        if graded:
+        # Written whenever grading was ATTEMPTED — including when it failed, so the evidence for
+        # *why* there's no score survives in the artifacts instead of vanishing.
+        if grader_results:
             _write_json(out_dir / "grading.json",
-                        {"reward": reward, "grader_results": [asdict(g) for g in grader_results]})
+                        {"reward": reward if graded else None, "graded": graded,
+                         "grading_error": grading_error,
+                         "grader_results": [asdict(g) for g in grader_results]})
         (out_dir / "prompt.md").write_text(redact(spec.instruction), encoding="utf-8")
         (out_dir / "raw.log").write_text(raw, encoding="utf-8")
 
@@ -291,7 +332,10 @@ class EvalRunner:
             "harness": {
                 "id": harness.name,
                 "cli": harness.cli,
-                "model": harness.model or "default (harness decides)",  # requested; observed added post-run
+                # Two distinct facts, never collapsed into one prose string: what we pinned, and
+                # (added after the trials) what the CLI reported actually running. `null` here means
+                # "we pinned nothing" — read `model_observed` for the name that was really used.
+                "model_requested": harness.model,
                 "skill_dirs": list(harness.skill_dirs),
                 "env_keys": list(harness.env_keys),  # names only, never values
             },
@@ -331,7 +375,8 @@ class EvalRunner:
         return trial
 
     def _build_meta(self, *, harness, spec, run_output, env_key_used, started_at, success,
-                    timed_out, error, command_count, changes, timing, reward, graded) -> RunMeta:
+                    timed_out, error, command_count, changes, timing, reward, graded,
+                    grading_error=None, export_error=None) -> RunMeta:
         in_tok, out_tok = run_output.input_tokens, run_output.output_tokens
         total_tok = run_output.total_tokens
         if total_tok is None and in_tok is not None and out_tok is not None:
@@ -356,10 +401,12 @@ class EvalRunner:
             num_skill_files_read=len(run_output.skill_files_read))
         meta = RunMeta(
             harness=harness.name, sandbox=self.sandbox.name, task=spec.name,
-            env_key_used=env_key_used, model=run_output.model, base_image=spec.docker_base,
+            env_key_used=env_key_used, model=run_output.model,
+            model_requested=getattr(harness, "model", None), base_image=spec.docker_base,
             platform=platform.platform(), adarubric_version=__version__, started_at=started_at,
             ended_at=_now(), success=success, timed_out=timed_out, error=error,
-            graded=graded, reward=reward, usage=usage, timing=timing, skill_usage=skill_usage,
+            graded=graded, reward=reward, grading_error=grading_error, export_error=export_error,
+            usage=usage, timing=timing, skill_usage=skill_usage,
             files_created=len(changes.created), files_modified=len(changes.modified),
             files_deleted=len(changes.deleted))
         return meta

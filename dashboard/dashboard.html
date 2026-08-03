@@ -157,6 +157,11 @@
   .pill.run .beat { width: 7px; height: 7px; }
   .subpath { font-family: var(--mono); font-size: 10px; color: var(--faint); margin-top: 2px; }
 
+  /* "When" column: absolute time on top (scannable, sortable), relative age underneath (what you
+     actually glance at). Nowrap so a run's date never wraps into two lines mid-table. */
+  .when-cell { white-space: nowrap; font-size: 12px; }
+  .when-cell .ago { font-size: 10px; color: var(--faint); margin-top: 2px; }
+
   .rw { display: flex; align-items: center; gap: 9px; min-width: 128px; }
   .rw .track { flex: 1; }
   .rw .fill.g { background: var(--good); } .rw .fill.w { background: var(--warn); } .rw .fill.b { background: var(--bad); }
@@ -263,7 +268,7 @@
           <thead><tr>
             <th>Status</th><th>Harness</th><th>Task</th><th>Model</th><th>Env</th>
             <th>Reward</th><th>Skill</th><th class="r">Turns</th><th class="r">Tokens</th><th class="r">Cost</th>
-            <th class="r">Time</th><th class="r">Δ files</th>
+            <th class="r">Time</th><th class="r">Δ files</th><th>When</th>
           </tr></thead>
           <tbody id="rows"></tbody>
         </table>
@@ -286,9 +291,48 @@
   let runs = [];
 
   const fmtInt = (n) => (n == null ? "—" : Number(n).toLocaleString("en-US"));
+  // Model naming: prefer what the CLI reported it actually ran; fall back to what we pinned; only
+  // then admit we don't know. Never print "default" — that's not the name of any model, and it hid
+  // the fact that some harnesses simply don't report one.
+  const modelName = (r) => r.model || r.model_requested || null;
+  const modelLabel = (r) => modelName(r) || "unreported";
+  const modelTitle = (r) =>
+    r.model ? `reported by the CLI: ${r.model}`
+    : r.model_requested ? `requested via --model: ${r.model_requested} (the CLI did not report back)`
+    : "this harness does not report its model, and none was pinned with --model";
   const fmtCost = (c) => (c == null ? "—" : "$" + Number(c).toFixed(4));
   const fmtReward = (r) => (r == null ? "—" : Number(r).toFixed(2));
   const fmtTime = (s) => (s == null ? "—" : s < 90 ? s.toFixed(0) + "s" : (s/60).toFixed(1) + "m");
+
+  // ---- dates ----
+  // run.json stores UTC ISO-8601; everything below renders in the VIEWER's local zone, because
+  // "when did this run" is a question you ask in your own timezone, not the container's.
+  const parseTs = (iso) => { if (!iso) return null; const d = new Date(iso); return isNaN(d) ? null : d; };
+  //: "3 Aug, 14:07" — compact enough for a table cell, unambiguous across month boundaries.
+  const fmtWhen = (iso) => {
+    const d = parseTs(iso); if (!d) return "—";
+    return d.toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  };
+  //: Full local date+time, for tooltips and the detail page where there's room to be precise.
+  const fmtFull = (iso) => {
+    const d = parseTs(iso); if (!d) return "—";
+    return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "medium" });
+  };
+  //: "4h ago" / "in a moment" — relative age, the thing you actually scan for.
+  const fmtAgo = (iso) => {
+    const d = parseTs(iso); if (!d) return "";
+    const secs = Math.round((Date.now() - d.getTime()) / 1000);
+    if (secs < 5) return "just now";
+    if (secs < 60) return `${secs}s ago`;
+    if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+    if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+    return `${Math.floor(secs / 86400)}d ago`;
+  };
+  //: Elapsed wall-clock for a job with a start but no end yet (still running).
+  const fmtElapsed = (iso) => {
+    const d = parseTs(iso); if (!d) return "—";
+    return fmtTime(Math.max(0, (Date.now() - d.getTime()) / 1000));
+  };
   const rewardClass = (r) => (r == null ? "" : r >= 0.8 ? "g" : r >= 0.5 ? "w" : "b");
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
   const cN = (r, k) => { const c = r.changes || {}; const n = c["n_" + k]; return n != null ? n : (c[k] || []).length; };
@@ -299,13 +343,17 @@
     const meanReward = graded.length ? graded.reduce((a, r) => a + r.reward, 0) / graded.length : null;
     const known = runs.filter((r) => r.skill_opened === true || r.skill_opened === false);
     const opened = known.filter((r) => r.skill_opened === true).length;
+    const broken = runs.filter((r) => r.grading_error).length;
     const cost = runs.reduce((a, r) => a + (r.cost_usd || 0), 0);
     const tokens = runs.reduce((a, r) => a + ((r.tokens && r.tokens.total) || 0), 0);
     const passed = graded.filter((r) => r.reward >= 0.8).length;
 
     const cards = [
       { label: "Runs", value: runs.length, foot: `${runs.filter((r)=>r.success).length} succeeded`, accent: false },
-      { label: "Mean reward", value: meanReward == null ? "—" : meanReward.toFixed(2), foot: `${passed}/${graded.length} scored ≥ 0.80`, accent: true },
+      // Runs whose grading broke are excluded from the average (they have no verdict) but counted
+      // here, so a wall of "grading failed" can't masquerade as a healthy mean over 2 runs.
+      { label: "Mean reward", value: meanReward == null ? "—" : meanReward.toFixed(2),
+        foot: `${passed}/${graded.length} scored ≥ 0.80` + (broken ? ` · ${broken} grading failed` : ""), accent: true },
       { label: "Skill-opened", value: known.length ? Math.round(100*opened/known.length) + "%" : "—", foot: `${opened}/${known.length} observed`, accent: false },
       { label: "Total cost", value: cost ? "$" + cost.toFixed(2) : "—", foot: "reported + estimated", accent: false },
       { label: "Total tokens", value: fmtInt(tokens), foot: "in + out, all runs", accent: false },
@@ -371,6 +419,9 @@
     return `<span class="pill mute" title="harness exposes no trajectory">unknown</span>`;
   }
   function rewardCell(r) {
+    // A broken check script is OUR failure, not the model's — it must never render as a red 0.00,
+    // and it must not be averaged into the pass rate.
+    if (r.grading_error) return `<span class="pill warn" title="${esc(r.grading_error)}">grading failed</span>`;
     if (!r.graded || r.reward == null) return `<span class="dim">ungraded</span>`;
     const pct = Math.round(100 * r.reward);
     return `<span class="rw"><span class="track"><span class="fill ${rewardClass(r.reward)}" style="width:${pct}%"></span></span><span class="n">${fmtReward(r.reward)}</span></span>`;
@@ -388,23 +439,29 @@
   function keyOf(r) { return `${r.harness}/${r.task}/attempt-${r.attempt}/trial-${r.trial}`; }
 
   function table() {
+    // Running jobs pinned to the top, then newest-first: a "When" column is only useful if the
+    // list is actually ordered by it. Runs with no timestamp sink to the bottom rather than
+    // scattering (Date.parse of undefined would otherwise sort unpredictably).
+    const startMs = (r) => { const d = parseTs(r.started_at); return d ? d.getTime() : -Infinity; };
     const shown = runs.filter((r) => filter === "all" || r.harness === filter)
-      .sort((a, b) => (a.running === b.running) ? 0 : (a.running ? -1 : 1));  // running jobs first
+      .slice()
+      .sort((a, b) => (a.running !== b.running) ? (a.running ? -1 : 1) : startMs(b) - startMs(a));
     $("empty").hidden = shown.length > 0;
     $("rows").innerHTML = shown.map((r) => `
       <tr class="run" tabindex="0" data-key="${esc(r._key)}" title="${esc(r.output_dir || r._key)}">
         <td>${statusPill(r)}</td>
         <td class="mono">${esc(r.harness)}</td>
         <td class="task"><a class="tasklink" href="#task=${encodeURIComponent(r.task)}">${esc(r.task)}</a><div class="subpath">${esc(r.output_dir || (r.harness + "/" + r.task + "/attempt-" + r.attempt + "/trial-" + r.trial))}</div></td>
-        <td class="mono dim">${esc(r.model || "default")}</td>
+        <td class="mono dim" title="${esc(modelTitle(r))}">${esc(modelLabel(r))}</td>
         <td class="dim">${esc(r.sandbox)}</td>
         <td>${rewardCell(r)}</td>
         <td>${skillPill(r)}</td>
         <td class="r mono">${r.turns == null ? '<span class="dim">—</span>' : r.turns}</td>
         <td class="r mono">${fmtInt(r.tokens && r.tokens.total)}</td>
         <td class="r mono">${fmtCost(r.cost_usd)}</td>
-        <td class="r mono">${fmtTime(r.time_s)}</td>
+        <td class="r mono">${r.running ? fmtElapsed(r.started_at) : fmtTime(r.time_s)}</td>
         <td class="r mono dim">+${cN(r,'created')}/~${cN(r,'modified')}/-${cN(r,'deleted')}</td>
+        <td class="when-cell" title="${esc(fmtFull(r.started_at))}">${fmtWhen(r.started_at)}<div class="ago">${esc(fmtAgo(r.started_at))}</div></td>
       </tr>`).join("");
 
     const go = (key) => { location.hash = "run=" + encodeURIComponent(key); };
@@ -430,7 +487,7 @@
     $("live").innerHTML = `<div class="live ${running ? "" : "idle"}">
       <div class="live-head ${running ? "" : "idle"}">
         <span class="status"><span class="beat"></span>${running ? `Live — ${n} job${n > 1 ? "s" : ""} running` : "Idle — no run in progress"}</span>
-        <span class="when">updated ${esc((live.updated_at || "").slice(11, 19) || "—")}</span>
+        <span class="when" title="${esc(fmtFull(live.updated_at))}">updated ${esc(fmtWhen(live.updated_at))}${live.updated_at ? ` · ${esc(fmtAgo(live.updated_at))}` : ""}</span>
       </div>
       <div class="feedwrap"><div class="fh">Activity — what the sandbox is doing (build · copy to docker · stage)</div><ul class="feed">${feed}</ul></div>
     </div>`;
@@ -463,14 +520,16 @@
     }
     const cells = [
       ["Status", t ? (t.stage || "running") : (r.timed_out ? "timed out" : (r.success ? "success" : "failed"))],
-      ["Reward", r.graded ? fmtReward(r.reward) : "ungraded"],
+      ["Reward", r.graded ? fmtReward(r.reward) : (r.grading_error ? "grading failed" : "ungraded")],
       ["Skill opened", r.skill_opened === true ? "yes" : r.skill_opened === false ? "no" : "unknown"],
       ["Turns", r.turns == null ? "—" : r.turns],
       ["Tool calls", r.tool_calls == null ? "—" : r.tool_calls],
       ["Commands", r.commands == null ? "—" : r.commands],
       ["Tokens", fmtInt(r.tokens && r.tokens.total)],
       ["Cost", fmtCost(r.cost_usd)],
-      ["Time", fmtTime(r.time_s)],
+      ["Time", t ? fmtElapsed(r.started_at) : fmtTime(r.time_s)],
+      ["Started", fmtWhen(r.started_at)],
+      ["Ended", t ? "running…" : fmtWhen(r.ended_at)],
     ];
     $("detail").innerHTML = `
       <a class="back" href="#">← All runs</a>
@@ -492,9 +551,13 @@
           <h3>Details</h3>
           <div class="facts">
             <div class="fact"><span class="fk">Path</span><span class="fv">${esc(r.output_dir || "—")}</span></div>
-            <div class="fact"><span class="fk">Model</span><span class="fv">${esc(r.model || "default")}</span></div>
+            <div class="fact"><span class="fk">Started</span><span class="fv">${esc(fmtFull(r.started_at))}${r.started_at ? ` <span class="dim">(${esc(fmtAgo(r.started_at))})</span>` : ""}</span></div>
+            <div class="fact"><span class="fk">Ended</span><span class="fv">${t ? "still running" : esc(fmtFull(r.ended_at))}</span></div>
+            <div class="fact"><span class="fk">Model</span><span class="fv">${esc(modelLabel(r))}<span class="dim"> — ${esc(modelTitle(r))}</span></span></div>
             <div class="fact"><span class="fk">Tools</span><span class="fv">${toolsStr(r)}</span></div>
             <div class="fact"><span class="fk">Cost source</span><span class="fv">${esc(r.cost_source || "n/a")}</span></div>
+            ${r.export_error ? `<div class="fact"><span class="fk">Saved files</span><span class="fv">Couldn't copy the agent's files out of the container, so you may not be able to browse them below.<br><span class="dim">The run itself finished and the score is real — only your local copy of the files is missing. Reason: ${esc(r.export_error)}</span></span></div>` : ""}
+            ${r.grading_error ? `<div class="fact"><span class="fk">Scoring</span><span class="fv err">The script that checks the answer never finished, so there is no score for this run.<br><span class="dim">Something is wrong with the checking setup, not with the agent — don't read this as the agent failing. Reason: ${esc(r.grading_error)}</span></span></div>` : ""}
             ${r.error ? `<div class="fact"><span class="fk">Error</span><span class="fv err">${esc(r.error)}</span></div>` : ""}
           </div>
         </div>
@@ -502,12 +565,14 @@
       </div>`;
   }
   function renderTaskPage(task) {
-    const trs = runs.filter((r) => r.task === task);
+    const trs = runs.filter((r) => r.task === task)
+      .sort((a, b) => (parseTs(b.started_at)?.getTime() || 0) - (parseTs(a.started_at)?.getTime() || 0));
     const cards = trs.map((r) => {
       const live = !!liveTrialFor(r);
       return `<a class="runcard" href="#run=${encodeURIComponent(r._key)}">
         <div class="rc-top"><span class="rc-h">${esc(r.harness)}</span>${statusPill(r)}</div>
-        <div class="rc-meta">attempt-${r.attempt} · trial-${r.trial} · ${esc(r.model || "default")}</div>
+        <div class="rc-meta" title="${esc(modelTitle(r))}">attempt-${r.attempt} · trial-${r.trial} · ${esc(modelLabel(r))}</div>
+        <div class="rc-meta" title="${esc(fmtFull(r.started_at))}">${fmtWhen(r.started_at)} · ${esc(fmtAgo(r.started_at))}</div>
         <div class="rc-row">${r.graded ? "reward " + fmtReward(r.reward) : "ungraded"} · ${r.turns == null ? "— turns" : r.turns + " turns"} · ${fmtCost(r.cost_usd)}${live ? ` · <span class="live-inline"><span class="beat"></span>running</span>` : ""}</div>
       </a>`;
     }).join("") || `<p class="empty">No runs for this task yet.</p>`;

@@ -23,11 +23,49 @@ import threading
 from pathlib import Path
 
 from adarubric.core.contracts import PROMPT_RELPATH, SKILL_INJECT_IGNORE, Harness, Sandbox
+from adarubric.core.errors import SandboxUnavailable
 from adarubric.core.models import EvalSpec, ShellResult
+from adarubric.sandboxes.staging import needs_normalising, normalized_source
 
 _HOME = "/root"
 _GENERIC_WORKDIR = "/workspace"
 _DEFAULT_BASE = "python:3.12-slim"
+
+# Substrings that mark "the daemon isn't reachable" rather than "your build/command was wrong".
+# Docker phrases this differently per platform (npipe on Windows, unix socket elsewhere), and the
+# message travels on stderr of whatever subcommand happened to run first.
+_DAEMON_DOWN_MARKERS = (
+    "cannot connect to the docker daemon",
+    "error during connect",
+    "the docker daemon is not running",
+    "is the docker daemon running",
+    "failed to connect to the docker api",
+    "docker_host",
+    "//./pipe/docker",
+    "/var/run/docker.sock",
+)
+
+
+def _is_daemon_down(text: str) -> bool:
+    low = (text or "").lower()
+    return any(m in low for m in _DAEMON_DOWN_MARKERS)
+
+
+def _raise_docker_failure(label: str, res: ShellResult) -> None:
+    """Raise for a failed docker command, classified by *whose* fault it is.
+
+    Daemon unreachable (it was up at preflight and died since, or Desktop restarted) →
+    :class:`SandboxUnavailable`, which aborts the run without recording a trial. Anything else — a
+    broken Dockerfile, a failing ``RUN`` step — is a genuine task/environment defect and stays a
+    ``RuntimeError``, i.e. a real failed trial.
+    """
+    detail = res.stderr or res.stdout or ""
+    if _is_daemon_down(detail):
+        raise SandboxUnavailable(
+            f"Docker stopped responding during {label} - the daemon went away mid-run. "
+            "Start Docker Desktop and re-run."
+        )
+    raise RuntimeError(f"{label} failed:\n{detail[-3000:]}")
 
 # Files that may hold credentials — removed from exports so keys never land in output/.
 _EXPORT_SCRUB = (
@@ -52,8 +90,10 @@ def _docker(*args: str, input_text: str | None = None, timeout: int = 1800) -> S
             ["docker", *args], capture_output=True, text=True, input=input_text,
             encoding="utf-8", errors="replace", timeout=timeout,
         )
-    except FileNotFoundError as exc:  # docker CLI not installed
-        raise RuntimeError("docker CLI not found — is Docker installed and on PATH?") from exc
+    except FileNotFoundError as exc:  # docker CLI not installed — our environment, not the agent's
+        raise SandboxUnavailable(
+            "Docker CLI not found on PATH. Install Docker Desktop (or use --sandbox local)."
+        ) from exc
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"docker {' '.join(args[:2])} timed out") from exc
     return ShellResult(stdout=proc.stdout, stderr=proc.stderr, exit_code=proc.returncode)
@@ -71,6 +111,27 @@ class DockerSandbox(Sandbox):
         self._workdirs: dict[str, str] = {}  # container id -> workdir
         self._lock = threading.Lock()
 
+    # ------------------------------------------------------------------ preflight
+
+    def preflight(self) -> None:
+        """Ping the daemon before the run creates anything.
+
+        A stopped Docker Desktop is the single most common way a run dies, and without this check it
+        died *late* — after the output tree, eval.yaml and a ``success: false`` run.json had been
+        written, which reads as "the agent failed" on the dashboard. Here it costs one fast
+        ``docker info`` and fails with one actionable line, having written nothing.
+        """
+        res = _docker("info", "--format", "{{.ServerVersion}}", timeout=30)
+        if res.exit_code == 0 and res.stdout.strip():
+            return
+        detail = (res.stderr or res.stdout or "").strip()
+        if _is_daemon_down(detail) or not detail:
+            raise SandboxUnavailable(
+                "Docker isn't running - can't reach the daemon. Start Docker Desktop, wait until it "
+                "reports running, then re-run. (Or use --sandbox local, which needs no Docker.)"
+            )
+        raise SandboxUnavailable(f"Docker is not usable: {detail[-500:]}")
+
     # ------------------------------------------------------------------ build
 
     def prepare(self, spec: EvalSpec, harness: Harness, env: dict[str, str] | None = None) -> str:
@@ -86,7 +147,7 @@ class DockerSandbox(Sandbox):
             self._note(f"building task image from {spec.dockerfile} (this can take a few minutes)…")
             res = _docker("build", "-t", base_tag, "-f", spec.dockerfile, context)
             if res.exit_code != 0:
-                raise RuntimeError(f"docker build (task) failed:\n{res.stderr[-3000:]}")
+                _raise_docker_failure("docker build (task)", res)
         else:
             base_tag = f"adarubric/{_slug(spec.name)}:task"
             self._note(f"building base image FROM {spec.docker_base or _DEFAULT_BASE}…")
@@ -99,7 +160,7 @@ class DockerSandbox(Sandbox):
                 lines.append(f"RUN {setup}")
             res = self._build_synth(base_tag, "\n".join(lines))
             if res.exit_code != 0:
-                raise RuntimeError(f"docker build (generic base) failed:\n{res.stderr[-3000:]}")
+                _raise_docker_failure("docker build (generic base)", res)
 
         # Overlay: prereqs + harness CLI. Skipped when the harness has nothing to install.
         tag = f"adarubric/{_slug(spec.name)}-{_slug(harness.name)}:latest"
@@ -111,7 +172,7 @@ class DockerSandbox(Sandbox):
         overlay.append('ENV PATH="/usr/local/bin:/root/.local/bin:${PATH}"')
         res = self._build_synth(tag, "\n".join(overlay))
         if res.exit_code != 0:
-            raise RuntimeError(f"docker build (harness overlay) failed:\n{res.stderr[-3000:]}")
+            _raise_docker_failure("docker build (harness overlay)", res)
         self._note(f"image ready: {tag}")
 
         with self._lock:
@@ -136,7 +197,7 @@ class DockerSandbox(Sandbox):
         self._note(f"starting container from {image}…")
         res = _docker(*run_args)
         if res.exit_code != 0:
-            raise RuntimeError(f"docker run failed:\n{res.stderr[-2000:]}")
+            _raise_docker_failure("docker run", res)
         cid = res.stdout.strip()
 
         # Workdir: the task Dockerfile's WORKDIR when set, else /workspace.
@@ -233,11 +294,16 @@ class DockerSandbox(Sandbox):
         self._note(f"staging grader → {dest} (after the agent finished)")
         parent = dest.rsplit("/", 1)[0] or "/"
         _docker("exec", workspace, "sh", "-c", f"mkdir -p '{parent}'")
-        src = Path(host_src)
-        # `docker cp <dir>/. <cid>:<dest>` copies contents into dest (like the dir itself).
-        srcarg = f"{host_src}/." if src.is_dir() else host_src
-        _docker("exec", workspace, "sh", "-c", f"mkdir -p '{dest}'" if src.is_dir() else f"true")
-        _docker("cp", srcarg, f"{workspace}:{dest}")
+        # A grader checked out with Windows line endings is unrunnable by the container's Linux
+        # shell and fails in ways that look like the agent scoring zero. Normalise on the way in.
+        if needs_normalising(host_src):
+            self._note("normalising Windows line endings in the grader (CRLF → LF)")
+        with normalized_source(host_src) as staged_src:
+            src = Path(staged_src)
+            # `docker cp <dir>/. <cid>:<dest>` copies contents into dest (like the dir itself).
+            srcarg = f"{staged_src}/." if src.is_dir() else staged_src
+            _docker("exec", workspace, "sh", "-c", f"mkdir -p '{dest}'" if src.is_dir() else "true")
+            _docker("cp", srcarg, f"{workspace}:{dest}")
 
     def export_workspace(self, workspace: str, dest_dir: str) -> None:
         self._note("exporting the agent's final workspace (credentials scrubbed)…")
@@ -245,12 +311,16 @@ class DockerSandbox(Sandbox):
         dest.mkdir(parents=True, exist_ok=True)
         for root in self._capture_roots(workspace):
             label = "home" if root == _HOME else (Path(root).name or "workspace")
-            _docker("cp", f"{workspace}:{root}", str(dest / f"__tmp_{label}"))
-            tmp = dest / f"__tmp_{label}"
             final = dest / label
             if final.exists():
                 shutil.rmtree(final, ignore_errors=True)
-            tmp.rename(final)
+            # Trailing "/." makes docker copy the directory's CONTENTS into an existing folder, so
+            # there is no temp name and no rename afterwards. The old temp+rename dance is what hit
+            # "[WinError 5] Access is denied": Windows refuses to rename a folder while anything
+            # holds a file inside it, and Defender is always mid-scan on a tree docker just wrote.
+            # Removing the rename removes the failure entirely — no OS-specific branch needed.
+            final.mkdir(parents=True, exist_ok=True)
+            _docker("cp", f"{workspace}:{root}/.", str(final))
         # Scrub credentials + prune runtime junk so secrets/bulk never land in output/.
         for rel in _EXPORT_SCRUB:
             f = dest / "home" / rel

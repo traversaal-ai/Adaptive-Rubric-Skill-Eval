@@ -2,9 +2,9 @@
 
 The runner emits a ``ProgressEvent`` at each stage; :class:`StatusReporter` writes them to disk
 immediately, plus a live **activity feed** of what the sandbox is doing (docker build, file staging,
-container commands) via :meth:`note`. A watching dashboard (``dashboard/generate.py --watch``) renders
-the run *as it happens* — current stage, and the activity feed — instead of a manual, after-the-fact
-snapshot.
+container commands) via :meth:`note`. The dashboard server (``python dashboard/serve.py``) polls this
+file and renders the run *as it happens* — current stage and activity feed — instead of a manual,
+after-the-fact snapshot.
 
 :class:`FanReporter` forwards each event to several reporters (e.g. the console + this file writer).
 """

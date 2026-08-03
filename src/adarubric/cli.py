@@ -114,6 +114,7 @@ def run(
     """
     import os
 
+    from adarubric.core.errors import SandboxUnavailable
     from adarubric.harnesses.registry import create_harness
     from adarubric.loading import load_spec
     from adarubric.reporting.status import FanReporter, StatusReporter
@@ -144,6 +145,16 @@ def run(
         )
         raise typer.Exit(code=1)
 
+    # Preflight the execution environment BEFORE creating any output. A stopped Docker daemon is a
+    # problem on our side, not an agent failure — it must not produce a trial folder, a status.json
+    # or a `success: false` run.json that then shows up in the dashboard as a lost run.
+    try:
+        create_sandbox(sandbox).preflight()
+    except SandboxUnavailable as exc:
+        typer.secho(str(exc), fg="red")
+        typer.echo("Nothing was written - no run recorded.")
+        raise typer.Exit(code=1) from None
+
     if timeout is not None:  # explicit flag wins over config-file value
         spec.timeout_sec = timeout
     graders = "skillbench-verifier" if spec.mode == "skillbench" else f"{len(spec.graders)} grader(s)"
@@ -156,7 +167,7 @@ def run(
     status = StatusReporter(status_path)
     reporter = FanReporter(TerminalReporter(), status)
     typer.echo(
-        f"live status → {status_path}  (live dashboard: python dashboard/serve.py --output {output})"
+        f"live status -> {status_path}  (live dashboard: python dashboard/serve.py --output {output})"
     )
 
     for hname, hmodel in harness_specs:
@@ -174,7 +185,9 @@ def run(
                 h.env_keys = tuple(k.strip() for k in acp_env_key.split(",") if k.strip())
             if acp_skill_dir:
                 h.skill_dirs = tuple(d.strip() for d in acp_skill_dir.split(",") if d.strip())
-        typer.echo(f"harness={hname}  model={hmodel or 'default (CLI decides)'}")
+        typer.echo(
+            f"harness={hname}  model={hmodel or 'not pinned - the CLI picks; the name it reports is recorded'}"
+        )
         # Fail fast if the harness's declared key isn't available (env or --env-file).
         missing = [k for k in h.env_keys if not (os.environ.get(k) or file_env.get(k))]
         if missing:
@@ -194,12 +207,24 @@ def run(
             # ACP is spawned directly (not via run_command), so hand it the injected keys explicitly.
             h.launch_env = harness_env
 
-        report = runner.run(h, spec, trials=trials, env=harness_env)
+        try:
+            report = runner.run(h, spec, trials=trials, env=harness_env)
+        except SandboxUnavailable as exc:  # daemon died after preflight — abort, don't score it
+            status.close()
+            typer.secho(str(exc), fg="red")
+            raise typer.Exit(code=1) from None
         for tr in report.trials:
             m = tr.meta
             u = m.usage
             cost = u.cost_usd if u.cost_usd is not None else u.estimated_cost_usd
-            reward = f"reward={tr.reward:.2f}" if tr.graded else "ungraded"
+            # "grading failed" is a third outcome, distinct from a low score: the check script never
+            # reached a verdict, so there IS no reward to report for this trial.
+            if tr.graded:
+                reward = f"reward={tr.reward:.2f}"
+            elif m.grading_error:
+                reward = "GRADING FAILED (not the agent's fault)"
+            else:
+                reward = "ungraded"
             turns = u.num_turns if u.num_turns is not None else "?"
             typer.echo(
                 f"    -> {tr.output_dir}\n"
@@ -208,6 +233,8 @@ def run(
                 f"time={m.timing.total_ms / 1000:.1f}s "
                 f"changes=+{m.files_created}/~{m.files_modified}/-{m.files_deleted}"
             )
+            if m.grading_error:
+                typer.secho(f"       grading error: {m.grading_error}", fg="yellow")
     status.close()
     typer.echo("done.")
 
@@ -250,7 +277,24 @@ def _load_env_file(path: str) -> dict[str, str]:
 
 def main() -> None:
     """Console-script entry point (see pyproject `[project.scripts]`)."""
+    _make_console_unicode_safe()
     app()
+
+
+def _make_console_unicode_safe() -> None:
+    """Never let a console encoding kill a run.
+
+    Legacy Windows consoles default to cp1252, which cannot encode the arrows and em dashes in our
+    help text and progress lines — writing one raised ``UnicodeEncodeError`` and aborted the whole
+    command mid-eval. Degrading unencodable characters to '?' is always better than losing the run.
+    """
+    import sys
+
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, ValueError):  # not a reconfigurable text stream (e.g. captured)
+            pass
 
 
 if __name__ == "__main__":
