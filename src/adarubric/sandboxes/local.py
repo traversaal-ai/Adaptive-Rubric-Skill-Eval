@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -48,7 +49,11 @@ class LocalSandbox(Sandbox):
 
         # 3. Inject each skill into the RUNNING harness's discovery dir(s) — relative to the
         #    workspace root (local runs the agent with cwd=workspace, so project discovery finds it).
-        for discovery in harness.skill_dirs:
+        #    Skipped entirely for `--inject-skills no`, the control half of "did the skill help?".
+        if not spec.inject_skills:
+            withheld = ", ".join(Path(p).name for p in spec.skill_paths) or "none"
+            self._note(f"skills NOT injected (--inject-skills no) — withheld: {withheld}")
+        for discovery in harness.skill_dirs if spec.inject_skills else ():
             base = root / discovery
             base.mkdir(parents=True, exist_ok=True)
             for spath in spec.skill_paths:
@@ -75,6 +80,21 @@ class LocalSandbox(Sandbox):
             env={**os.environ, **(env or {})},
         )
         return ShellResult(stdout=proc.stdout, stderr=proc.stderr, exit_code=proc.returncode)
+
+    def popen(
+        self, workspace: str, command: str, env: dict[str, str] | None = None
+    ) -> "subprocess.Popen[str]":
+        """Start an interactive process with the workspace as its working directory."""
+        args = list(command) if isinstance(command, (list, tuple)) else shlex.split(
+            command, posix=(os.name != "nt")  # keep Windows backslash paths intact
+        )
+        self._note(f"starting interactive agent: {command}")
+        return subprocess.Popen(  # noqa: S603 - launching the user-specified agent is the point
+            args, cwd=workspace,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+            env={**os.environ, **(env or {})},
+        )
 
     def stage(self, workspace: str, host_src: str, dest: str) -> None:
         # Same CRLF normalisation as the docker sandbox: on a POSIX host, a grader checked out with

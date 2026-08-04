@@ -132,6 +132,11 @@ def _run_record(run_json: Path, meta: dict) -> dict:
         # as a failure, so a file lock can't masquerade as the agent losing.
         "export_error": meta.get("export_error"),
         "skill_opened": skill.get("skill_opened"),
+        # "used" (read past the front page) | "noticed" (front page only) | "not_opened" | None.
+        # Reading SKILL.md's headings and then ignoring them is not skill use, and skill_opened alone
+        # cannot tell the two apart.
+        "skill_depth": skill.get("skill_depth"),
+        "skill_files": skill.get("skill_files_read") or [],
         "turns": usage.get("num_turns"),
         "tool_calls": usage.get("num_tool_calls"),
         "commands": usage.get("num_commands"),
@@ -167,6 +172,7 @@ def _running_record(output_root: str, t: dict) -> dict:
         "attempt": attempt, "trial": trial, "running": True, "stage": t.get("stage"),
         "success": False, "timed_out": False, "graded": False, "reward": None,
         "grading_error": None, "export_error": None, "skill_opened": None,
+        "skill_depth": None, "skill_files": [],
         "turns": None, "tool_calls": None, "commands": None, "tools": {},
         "tokens": {"input": None, "output": None, "total": None}, "cost_usd": None, "cost_source": None,
         "time_s": None,

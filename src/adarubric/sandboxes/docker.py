@@ -230,7 +230,10 @@ class DockerSandbox(Sandbox):
 
         # Inject skills into the container HOME per this harness's discovery dirs
         # (SkillsBench-faithful: /root/.claude/skills etc; cwd-independent).
-        for d in harness.skill_dirs:
+        if not spec.inject_skills:
+            withheld = ", ".join(Path(p).name for p in spec.skill_paths) or "none"
+            self._note(f"skills NOT injected (--inject-skills no) — withheld: {withheld}")
+        for d in harness.skill_dirs if spec.inject_skills else ():
             base = f"{_HOME}/{d}"
             _docker("exec", cid, "sh", "-c", f"mkdir -p '{base}'")
             for spath in spec.skill_paths:
@@ -288,6 +291,28 @@ class DockerSandbox(Sandbox):
                 if res.exit_code == 0:
                     break
         return snapshot
+
+    def popen(
+        self, workspace: str, command: str, env: dict[str, str] | None = None
+    ) -> "subprocess.Popen[str]":
+        """Start an interactive process INSIDE the container via ``docker exec -i``.
+
+        This is the ACP bridge. ``-i`` keeps stdin open so the container process's stdin/stdout become
+        the JSON-RPC channel; no ``-t``, because a TTY would inject control characters and corrupt the
+        newline-delimited protocol. The agent therefore runs next to the task's real files, which is
+        what makes SkillsBench tasks (docker-only) reachable over ACP at all.
+        """
+        args = ["docker", "exec", "-i", "-w", self._workdirs.get(workspace, _GENERIC_WORKDIR)]
+        for k, v in (env or {}).items():
+            args += ["-e", f"{k}={v}"]
+        cmd = command if isinstance(command, str) else " ".join(command)
+        args += [workspace, "sh", "-lc", cmd]
+        self._note(f"starting interactive agent in the container: {cmd}")
+        return subprocess.Popen(  # noqa: S603 - fixed docker argv, user command passed to the shell
+            args,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+        )
 
     def stage(self, workspace: str, host_src: str, dest: str) -> None:
         # dest is an absolute container path (e.g. /verifier). Ensure parent exists, then docker cp.

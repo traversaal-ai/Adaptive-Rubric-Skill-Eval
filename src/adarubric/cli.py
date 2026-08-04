@@ -86,6 +86,13 @@ def run(
         True, "--grade/--no-grade",
         help="Run deterministic graders after the agent (skillbench verifier / config graders).",
     ),
+    inject_skills: str = typer.Option(
+        "yes", "--inject-skills",
+        help="Give the agent the task's skills: yes (default) | no. 'no' runs the SAME task with the "
+        "guidance withheld — the control half of 'did the skill actually help?'. Either way the run "
+        "records which skills existed, so the two conditions stay comparable. "
+        "Accepts yes/no, true/false, 1/0, on/off.",
+    ),
     env_file: str = typer.Option(
         None, "--env-file", help="Load KEY=VALUE env vars (e.g. API keys) from a file."
     ),
@@ -98,6 +105,19 @@ def run(
         help="For --harness acp: comma-separated env var(s) the ACP agent needs (declares them so "
         "they're injected from --env-file and checked up-front). Optional; the agent also inherits "
         "your shell environment.",
+    ),
+    acp_install: str = typer.Option(
+        None, "--acp-install",
+        help="For --harness acp with --sandbox docker: how to install the wrapped agent's CLI into the "
+        "image. Either the NAME of a built-in harness to reuse its installer (e.g. 'gemini-cli' — the "
+        "easy path, it already handles installing Node) or a raw shell snippet. Omit if the command "
+        "already exists in the task image.",
+    ),
+    acp_name: str = typer.Option(
+        None, "--acp-name",
+        help="For --harness acp: the label this run is filed under (output/<label>/…). Defaults to the "
+        "wrapped agent's name, e.g. 'acp-gemini', so ACP runs of different agents don't pile into one "
+        "folder and become impossible to compare.",
     ),
     acp_skill_dir: str = typer.Option(
         None, "--acp-skill-dir",
@@ -127,6 +147,13 @@ def run(
     harness_specs = _parse_harness_specs(harness, model)
 
     spec = load_spec(path, instruction, task=task)
+    spec.inject_skills = _parse_bool_flag(inject_skills, "--inject-skills")
+    if not spec.inject_skills:
+        withheld = ", ".join(os.path.basename(p) for p in spec.skill_paths) or "none"
+        typer.secho(
+            f"--inject-skills no: withholding {withheld}. This is the CONTROL run — compare its "
+            f"reward against a normal run to see what the skill is worth.", fg="yellow",
+        )
 
     # --dataset validation / override (auto = trust the detected shape).
     if dataset not in ("auto", "skillbench", "generic"):
@@ -170,6 +197,7 @@ def run(
         f"live status -> {status_path}  (live dashboard: python dashboard/serve.py --output {output})"
     )
 
+    all_rewards: list[float] = []
     for hname, hmodel in harness_specs:
         h = create_harness(hname, model=hmodel)
         # Configure the generic ACP wrapper from its dedicated flags.
@@ -177,16 +205,31 @@ def run(
             if not acp_cmd:
                 typer.secho("--harness acp requires --acp-cmd (e.g. --acp-cmd 'gemini --acp').", fg="red")
                 raise typer.Exit(code=1)
-            if sandbox != "local":
-                typer.secho("--harness acp currently supports --sandbox local only.", fg="red")
-                raise typer.Exit(code=1)
             h.command = acp_cmd
             if acp_env_key:
                 h.env_keys = tuple(k.strip() for k in acp_env_key.split(",") if k.strip())
             if acp_skill_dir:
                 h.skill_dirs = tuple(d.strip() for d in acp_skill_dir.split(",") if d.strip())
+            # Every ACP run would otherwise be filed under plain "acp/", so gemini-over-ACP and
+            # codex-over-ACP would land in the same folder and overwrite each other's attempts. Label
+            # it with the wrapped agent instead.
+            h.name = acp_name or _acp_label(acp_cmd)
+            if acp_install:
+                # A harness name reuses that harness's installer — which already knows it must install
+                # Node before npm exists. Anything else is taken as a shell snippet.
+                try:
+                    h.docker_install = create_harness(acp_install).docker_install
+                    typer.echo(f"  --acp-install {acp_install}: reusing that harness's installer")
+                except ValueError:
+                    h.docker_install = acp_install
+            elif sandbox == "docker":
+                typer.secho(
+                    "--harness acp --sandbox docker: no --acp-install given, so the agent command must "
+                    "already exist in the task image. Pass --acp-install <harness-name> (e.g. "
+                    "gemini-cli) or a shell snippet.", fg="yellow",
+                )
         typer.echo(
-            f"harness={hname}  model={hmodel or 'not pinned - the CLI picks; the name it reports is recorded'}"
+            f"harness={h.name}  model={hmodel or 'not pinned - the CLI picks; the name it reports is recorded'}"
         )
         # Fail fast if the harness's declared key isn't available (env or --env-file).
         missing = [k for k in h.env_keys if not (os.environ.get(k) or file_env.get(k))]
@@ -200,6 +243,10 @@ def run(
 
         sb = create_sandbox(sandbox)
         sb.activity = status.note  # sandbox reports build/copy/exec steps into the live feed
+        if hname == "acp":
+            # Hand the harness the sandbox's interactive launcher: a local process, or `docker exec -i`
+            # into the container. Same ACP conversation either way — this is what unlocks docker.
+            h.spawn = sb.popen
         runner = EvalRunner(sb, output_root=output, reporter=reporter, grade=grade)
         # Inject ONLY this harness's declared key(s) from the file into the sandbox.
         harness_env = {k: file_env[k] for k in h.env_keys if k in file_env}
@@ -221,6 +268,7 @@ def run(
             # reached a verdict, so there IS no reward to report for this trial.
             if tr.graded:
                 reward = f"reward={tr.reward:.2f}"
+                all_rewards.append(tr.reward)
             elif m.grading_error:
                 reward = "GRADING FAILED (not the agent's fault)"
             else:
@@ -236,7 +284,133 @@ def run(
             if m.grading_error:
                 typer.secho(f"       grading error: {m.grading_error}", fg="yellow")
     status.close()
+    # A clean sweep of zeros is the signature of a broken task, not a weak model — that is exactly
+    # how the mangled-line-endings bug hid. Point at the free check instead of letting the user guess.
+    if all_rewards and all(r < 0.001 for r in all_rewards) and spec.oracle_path:
+        typer.secho(
+            f"\nEvery trial scored 0. That can mean the TASK is broken rather than the agent.\n"
+            f"Verify it for free (no model, no key):  uv run adarubric check {path}",
+            fg="yellow",
+        )
     typer.echo("done.")
+
+
+@app.command()
+def check(
+    path: str = typer.Argument(..., help="Path to a SkillsBench task package."),
+    sandbox: str = typer.Option("docker", "--sandbox", help="Where to run: docker (default) | local."),
+    output: str = typer.Option(
+        "output", "--output", help="Output root; the check lands in <output>/oracle/<task>/."
+    ),
+    timeout: int = typer.Option(None, "--timeout", help="Seconds to allow the solution to run."),
+) -> None:
+    """Prove a task is passable BEFORE spending money on agents.
+
+    Runs the task's own ``oracle/solve.sh`` — the reference solution its author wrote — and grades it
+    with the task's real grader. A healthy task scores 1.00. Anything less means the *task* is broken
+    (bad grader, missing dependency, mangled line endings) and every agent score you collect from it
+    would be meaningless.
+
+    Costs nothing: no model, no API key, no tokens. Run this first on any task that is new to you, or
+    whenever every agent mysteriously scores zero.
+    """
+    import os
+
+    from adarubric.core.errors import SandboxUnavailable
+    from adarubric.harnesses.registry import create_harness
+    from adarubric.loading import load_spec
+    from adarubric.reporting.terminal import TerminalReporter
+    from adarubric.runner import EvalRunner
+    from adarubric.sandboxes.registry import create_sandbox
+
+    spec = load_spec(path, None)
+    if not spec.oracle_path:
+        typer.secho(
+            f"No oracle/solve.sh in {path} — there is no reference solution to check.\n"
+            "Only SkillsBench-style tasks ship one.", fg="red",
+        )
+        raise typer.Exit(code=1)
+    if timeout is not None:
+        spec.timeout_sec = timeout
+
+    try:
+        create_sandbox(sandbox).preflight()
+    except SandboxUnavailable as exc:
+        typer.secho(str(exc), fg="red")
+        raise typer.Exit(code=1) from None
+
+    typer.echo(f"checking task={spec.name}  sandbox={sandbox}  (reference solution, no model, free)")
+    harness = create_harness("oracle")
+    runner = EvalRunner(create_sandbox(sandbox), output_root=output,
+                        reporter=TerminalReporter(), grade=True)
+    report = runner.run(harness, spec, trials=1, env={})
+    trial = report.trials[0]
+    meta = trial.meta
+
+    typer.echo(f"    -> {trial.output_dir}")
+    if meta.error:
+        typer.secho(f"\nBROKEN: the reference solution itself failed to run.\n{meta.error}", fg="red")
+        raise typer.Exit(code=1)
+    if meta.grading_error:
+        typer.secho(f"\nBROKEN: grading never produced a result.\n{meta.grading_error}", fg="red")
+        raise typer.Exit(code=1)
+    if not meta.graded:
+        typer.secho("\nBROKEN: nothing scored this run.", fg="red")
+        raise typer.Exit(code=1)
+    if trial.reward >= 0.999:
+        typer.secho(f"\nOK: the reference solution scores {trial.reward:.2f}. "
+                    "The task and its grader work — agent scores from it are trustworthy.", fg="green")
+        return
+    typer.secho(
+        f"\nBROKEN: the reference solution scores only {trial.reward:.2f}, expected 1.00.\n"
+        "The task cannot be passed even with the correct answer, so any agent score is meaningless.\n"
+        f"Look at {os.path.join(trial.output_dir, 'grading.json')} for what the grader said.",
+        fg="red",
+    )
+    raise typer.Exit(code=1)
+
+
+#: Command words that wrap the real agent rather than being it — skipped when labelling an ACP run.
+_ACP_WRAPPERS = {"npx", "node", "npm", "bunx", "bun", "deno", "uv", "uvx", "run", "python", "python3",
+                 "sh", "bash", "-y", "--yes", "exec", "pipx"}
+
+
+def _acp_label(command: str) -> str:
+    """Name an ACP run after the agent it wraps: 'acp-gemini', 'acp-claude-code-acp'.
+
+    Filing every ACP run under a bare "acp" would put different agents in the same output folder,
+    where their attempt numbers collide and no comparison is possible.
+    """
+    import re as _re
+
+    tokens = [t for t in (command or "").replace("\t", " ").split(" ") if t]
+    for token in tokens:
+        if token.lower() in _ACP_WRAPPERS or token.startswith("-"):
+            continue
+        # "@zed-industries/claude-code-acp" -> "claude-code-acp"; "/usr/bin/gemini" -> "gemini"
+        leaf = token.replace("\\", "/").rstrip("/").split("/")[-1]
+        leaf = _re.sub(r"\.(js|mjs|cjs|py|exe)$", "", leaf, flags=_re.IGNORECASE)
+        leaf = _re.sub(r"[^A-Za-z0-9._-]+", "-", leaf).strip("-.")
+        if leaf:
+            return f"acp-{leaf.lower()}"
+    return "acp"
+
+
+_TRUE = {"yes", "y", "true", "t", "1", "on"}
+_FALSE = {"no", "n", "false", "f", "0", "off"}
+
+
+def _parse_bool_flag(value: str, flag: str) -> bool:
+    """Accept the several spellings people actually type for a yes/no flag."""
+    v = (value or "").strip().lower()
+    if v in _TRUE:
+        return True
+    if v in _FALSE:
+        return False
+    typer.secho(
+        f"{flag} expects yes/no (also true/false, 1/0, on/off) — got '{value}'.", fg="red"
+    )
+    raise typer.Exit(code=1)
 
 
 def _parse_harness_specs(harness: str, default_model: str | None) -> list[tuple[str, str | None]]:

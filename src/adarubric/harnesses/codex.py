@@ -81,7 +81,7 @@ def parse_codex_jsonl(stdout: str, stderr: str = "") -> RunOutput:
     seen: set[tuple] = set()
     messages: list[str] = []
     errors: list[str] = []
-    in_tok = out_tok = turns = 0
+    in_tok = out_tok = turns = cached_in = 0
     parsed_any = False
     model: str | None = None
 
@@ -102,6 +102,10 @@ def parse_codex_jsonl(stdout: str, stderr: str = "") -> RunOutput:
             itype = item.get("type")
             if itype == "agent_message" and item.get("text"):
                 messages.append(item["text"])
+                # One model reply == one turn. Codex's own `turn.completed` counts PROMPT cycles, so
+                # it is always 1 for our single-prompt runs — a 10-command session reported "1 turn"
+                # while claude reported 12 for comparable work, making the column meaningless.
+                turns += 1
             elif itype == "command_execution":
                 tool_counts["command_execution"] = tool_counts.get("command_execution", 0) + 1
                 m = _SKILL_PATH_RE.search(item.get("command") or "")
@@ -118,10 +122,11 @@ def parse_codex_jsonl(stdout: str, stderr: str = "") -> RunOutput:
                 tname = item.get("name") or "unknown"
                 tool_counts[tname] = tool_counts.get(tname, 0) + 1
         elif etype == "turn.completed":
-            turns += 1
+            # Usage only — NOT a turn count (see the agent_message branch above).
             usage = ev.get("usage") or {}
             in_tok += usage.get("input_tokens") or 0
             out_tok += usage.get("output_tokens") or 0
+            cached_in += usage.get("cached_input_tokens") or 0
         elif etype in ("error", "turn.failed"):
             msg = ev.get("message") or (ev.get("error") or {}).get("message") or json.dumps(ev)
             errors.append(str(msg)[:500])
@@ -149,6 +154,7 @@ def parse_codex_jsonl(stdout: str, stderr: str = "") -> RunOutput:
         model=model,
         input_tokens=in_tok or None,
         output_tokens=out_tok or None,
+        cached_input_tokens=cached_in or None,
         num_turns=turns or None,
         tools_used=sorted(tool_counts),
         tool_counts=tool_counts,

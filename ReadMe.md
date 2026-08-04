@@ -1,12 +1,15 @@
 # AdaRubric — Skill Eval
 
-A Python harness for evaluating how coding agents (**Claude Code, Gemini CLI, Codex, …**) discover
-and use **Agent Skills**. It runs a skill on a chosen harness inside an isolated sandbox (local or
-Docker), records rich metrics — including the paper-critical **"did the agent actually open the
-skill?"** signal — and then grades the result with deterministic checks.
+A Python harness that measures **whether a coding agent reads the instructions you give it, and
+whether that changes its answer.**
 
-It accepts **two input shapes**:
-- a plain **skill folder** (a `SKILL.md` + resources) plus an instruction, and
+You hand it a skill (a folder with a `SKILL.md` guide inside) and a task. It runs a real coding agent
+— Claude Code, Gemini CLI, Codex, or anything speaking ACP — inside an isolated container, records
+what the agent did, and scores the result with the task's own checks.
+
+It takes two kinds of input:
+
+- **your own skill** — a folder with `SKILL.md` plus an instruction, or
 - a **[SkillsBench](https://github.com/benchflow-ai/skillsbench)** task package (`task.md` +
   `environment/` + `verifier/` + `oracle/`).
 
@@ -22,52 +25,71 @@ cd AdaRubric-Skill-Eval
 uv venv
 uv pip install -e ".[dev]"
 
-# 2. verify — no API keys, no Docker, no dataset needed (the suite uses fakes/mocks)
+# 2. check it works — no API key, no Docker, no dataset needed
 uv run adarubric --help
-uv run pytest                       # expect: all pass, 1 skipped (the Docker test is gated)
+uv run pytest                # all pass, 1 skipped (the Docker test is opt-in)
 ```
 
-That `pytest` run is your fastest confidence check that everything works. To run a **real** task you
-then need an API key (below); for a **SkillsBench** task you also need Docker + the dataset.
+That `pytest` run is your fastest confidence check. The suite uses fake agents and a mock ACP agent,
+so it costs nothing and needs no keys.
 
-**Provide the harness's API key** via a `.env` file (never committed) and `--env-file`:
+**To run a real task** you need an API key in a `.env` file (never committed):
 
 ```
-# .env  — only the key for the harness you run is injected into the sandbox
 ANTHROPIC_API_KEY=sk-ant-...      # claude-code
 OPENAI_API_KEY=sk-...             # codex
 GEMINI_API_KEY=...                # gemini-cli
 ```
 
-**Not included in the repo** (fetch/create these yourself): `dataset/` (clone SkillsBench — see §3),
-`.env` (your keys), `output/` (created on the first run). The live dashboard test (`--sandbox docker`
-integration) is skipped unless you set `ADARUBRIC_DOCKER_TESTS=1` and have Docker running.
+Only the key belonging to the harness you run is injected into the container.
+
+**Not in the repo** (you fetch or create these): `dataset/` (clone SkillsBench, see §3), `.env`,
+`output/` (made on first run). The Docker integration test is skipped unless you set
+`ADARUBRIC_DOCKER_TESTS=1`.
 
 ---
 
-## Quickstart — the ways to run
+## Check a task before you spend money on it
 
-> **Generic mode = your own skill.** You give AdaRubric a folder; it assembles the run and
-> **generates** the manifest `eval.yaml` into the output. `eval.yaml` is *never* something you
-> write — it's the record of what ran.
+```bash
+uv run adarubric check dataset/skillsbench/tasks/invoice-fraud-detection
+```
 
-### 1. The convention folder (recommended for your own skills)
+Every SkillsBench task ships `oracle/solve.sh` — a worked solution its author wrote. This runs it and
+grades it with the task's real grader. A healthy task scores **1.00**.
 
-Put your skill's `SKILL.md` in a folder, and — at the folder root — optionally add a **`TASK.md`**
-(the instruction given to the agent) and a **`grader.yaml`** (the deterministic checks). Then point
-at the folder:
+**This is free** — no model, no API key, no tokens. Just a shell script.
+
+If it scores anything less, the **task** is broken (bad grader, missing dependency, mangled line
+endings) and any agent score you collect from it means nothing. Run this on any task that's new to
+you, and any time every agent mysteriously scores zero.
+
+> Worth doing. We lost real money on agent runs that all scored 0.0 before discovering the cause was
+> Windows line endings breaking the grader script. One free check would have said so immediately.
+> When a run ends with every trial at zero, the CLI now points you here.
+
+---
+
+## The ways to run
+
+> **Your own skill?** You give AdaRubric a folder; it writes the record of what ran into
+> `eval.yaml`. **You never write `eval.yaml`** — it's the receipt, not the recipe.
+
+### 1. A skill folder (simplest)
+
+Put `SKILL.md` in a folder. Optionally add `TASK.md` (the instruction) and `grader.yaml` (the checks):
 
 ```
 my-skill/
-  SKILL.md         # the skill under test (required)
-  TASK.md          # the instruction (optional; or pass --instruction)
-  grader.yaml      # deterministic checks (optional; omit for an ungraded run)
+  SKILL.md         # the skill being tested (required)
+  TASK.md          # the instruction (optional; or use --instruction)
+  grader.yaml      # the checks (optional; leave out for an unscored run)
 ```
 
 ```yaml
-# grader.yaml — reward = weighted pass fraction of these checks
+# grader.yaml — reward is the weighted pass fraction of these
 graders:
-  - run: pytest -q                 # a shell check; exit 0 (or "REWARD SCORE: x") → score
+  - run: pytest -q                 # exit 0, or print "REWARD SCORE: x"
     weight: 1.0
   - run: test -f report.txt
     weight: 0.5
@@ -75,31 +97,28 @@ graders:
 
 ```bash
 uv run adarubric run ./my-skill --harness claude-code --dataset generic --env-file .env
-# (TASK.md supplies the instruction; --instruction overrides it)
 ```
 
-`TASK.md` and `grader.yaml` are **control files** — they are stripped out before the skill is
-injected, so the agent never sees the task's grading.
+`TASK.md` and `grader.yaml` are **stripped out before the skill is copied to the agent**, so it can
+never read its own marking scheme.
 
-### 2. Power-user single file (`adarubric.yaml`)
+### 2. One config file (`adarubric.yaml`)
 
-When you need a Docker recipe, workspace input files, or several tasks in one file, drop an
-**`adarubric.yaml`** next to `SKILL.md` instead (it wins over the convention files):
+When you need a Docker recipe, input files, or several tasks in one place:
 
 ```yaml
-# adarubric.yaml (all-in-one)
 name: my-task
 instruction: |
   Solve the task described in the workspace.
 workspace:
-  - fixtures/input.json           # copied into the workspace (src, or src:dest)
+  - fixtures/input.json           # copied in (src, or src:dest)
 docker:
-  base: python:3.12-slim          # synthesized image: FROM base + setup + harness overlay
+  base: python:3.12-slim
   setup:
     - pip install pandas
 timeout: 600
 graders:
-  - type: deterministic           # runs AFTER the agent; reads a 0..1 score from stdout
+  - type: deterministic
     run: pytest -q && echo "REWARD SCORE: 1.0"
     weight: 1.0
 ```
@@ -108,116 +127,301 @@ graders:
 uv run adarubric run ./my-task --harness claude-code --dataset generic --sandbox docker --env-file .env
 ```
 
-### 3. A SkillsBench benchmark task (skillbench mode, Docker)
+### 3. A SkillsBench task (needs Docker)
 
-**Get the dataset first.** SkillsBench is a separate, large repo — it's **not vendored here** (it's
-gitignored under `dataset/`). Clone it yourself:
+**Get the dataset first.** It's a separate, large repo, not included here:
 
 ```bash
 git clone https://github.com/benchflow-ai/skillsbench dataset/skillsbench
-# tasks then live at dataset/skillsbench/tasks/<task-id>/
 ```
 
-- **Source:** [github.com/benchflow-ai/skillsbench](https://github.com/benchflow-ai/skillsbench)
-  (~87 task packages across 8 domains; paper: arXiv 2602.12670).
-- **Layout:** each task is `tasks/<id>/{task.md, environment/{Dockerfile,skills/}, verifier/, oracle/}`.
-
-SkillsBench tasks are Docker-native (they hardcode `/app`, `/verifier`, `/logs`), so run them faithfully
-in Docker — the task's own `environment/Dockerfile` is built and the `verifier/` scores the result:
+⚠️ **On Windows, check your line endings.** If `git config core.autocrlf` is `true`, the clone
+rewrites every grader script to Windows line endings, and Linux inside the container can't run them —
+**every task silently scores 0**. AdaRubric now cleans them on the way into the container, so runs
+work regardless, but the dataset itself is easier to work with fixed:
 
 ```bash
-uv run adarubric run dataset/skillsbench/tasks/dialogue-parser \
+git -C dataset/skillsbench config core.autocrlf false
+```
+
+Then:
+
+```bash
+uv run adarubric run dataset/skillsbench/tasks/invoice-fraud-detection \
     --harness claude-code --dataset skillbench --sandbox docker --env-file .env
 ```
 
-### Run several harnesses / pick a model per harness / repeat
+These tasks hardcode `/app`, `/verifier`, `/logs`, so Docker isn't optional — the task's own
+`environment/Dockerfile` is built and its `verifier/` does the scoring.
+
+### 4. Several harnesses, models, repeats
 
 ```bash
-# same task on three harnesses (a matrix run) — each lands in its own output folder
+# same task on three agents — each gets its own output folder
 uv run adarubric run <task> --harness claude-code,codex,gemini-cli --sandbox docker --env-file .env
 
-# pin a DIFFERENT model per harness with name:model
+# a different model per agent
 uv run adarubric run <task> \
-    --harness claude-code:claude-opus-4-8,codex:gpt-5-codex,gemini-cli:gemini-2.5-pro \
+    --harness claude-code:claude-opus-4-8,codex:gpt-5.6-luna,gemini-cli:gemini-2.5-pro \
     --sandbox docker --env-file .env
 
-# one default model for every harness (--model), repeated 3 times ("trials")
+# one model for all, run 3 times (agents are non-deterministic)
 uv run adarubric run <task> --harness claude-code,codex --model claude-opus-4-8 --trials 3 --env-file .env
 ```
 
-### Files you write vs files AdaRubric generates
+### 5. Does the skill actually help? Run it without one
 
-The three `*.yaml` names are easy to confuse — here's the whole truth:
+```bash
+uv run adarubric run <task> --harness codex --inject-skills no --sandbox docker --env-file .env
+```
 
-| File | Written by | In / out | What it holds |
-|------|-----------|----------|---------------|
-| `grader.yaml` | **you** (optional) | input | *Only* the deterministic checks (`graders:` — commands + weights). Convention mode. |
-| `adarubric.yaml` | **you** (optional) | input | The all-in-one config: instruction + workspace + docker + graders + timeout (+ multi-task). Wins over the convention files. |
-| `eval.yaml` | **AdaRubric** (always) | **output** | The generated manifest/receipt of a run: harness, model (requested + observed), env, skills, grading pointers. You never author it. |
+Same task, guidance withheld. Compare its reward against a normal run — **that difference is what a
+skill is worth**, and it's the question the benchmark exists to ask.
 
-`grader.yaml` and `adarubric.yaml` are **inputs you author**; `eval.yaml` is the **record we
-produce**. All input control files (`grader.yaml`, `adarubric.yaml`, `TASK.md`) are stripped before
-the skill is injected, so the agent never sees the task's grading.
+The run still records *which* skills were withheld (`skills: [...]` plus `skills_injected: false`),
+so a control run can never be mistaken for a task that simply has no skills.
+
+### Files you write vs files we generate
+
+| File | Written by | In/out | Holds |
+|------|-----------|--------|-------|
+| `grader.yaml` | **you** (optional) | input | just the checks (commands + weights) |
+| `adarubric.yaml` | **you** (optional) | input | everything: instruction, input files, docker, checks, timeout. Wins over the convention files. |
+| `eval.yaml` | **AdaRubric** | **output** | the receipt of a run: harness, model asked for + model actually used, skills, grading pointers |
 
 ---
 
-## CLI reference (`adarubric run`)
+## CLI reference
+
+### `adarubric run`
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `<path>` | — | A skill folder or a SkillsBench task package. |
-| `--harness` | *(required)* | `claude-code` \| `gemini-cli` \| `codex` \| `acp` (generic ACP wrapper, needs `--acp-cmd`), comma-separated for a matrix run. Explicit — **no key auto-detection**. Pin a model per harness with `name:model` (e.g. `claude-code:claude-opus-4-8,codex:gpt-5-codex`). |
-| `--acp-cmd` / `--acp-skill-dir` / `--acp-env-key` | — | For `--harness acp`: the agent launch command (e.g. `'gemini --acp'`), the wrapped agent's skill dir, and its required env var(s). `--sandbox local` only for now. |
-| `--sandbox` | `local` | `local` (OS temp dir) or `docker` (isolated container; required for faithful SkillsBench runs). |
-| `--model` | *(CLI default)* | Default model for **all** harnesses (e.g. `claude-opus-4-8`). Overridden per harness by `name:model` in `--harness`. Recorded in `eval.yaml`. |
-| `--dataset` | `auto` | `auto` detects the shape; `skillbench` / `generic` validate or force a pipeline. |
-| `--instruction` | — | Overrides `TASK.md` / `task.md` / the config; required if none of them supply one. |
-| `--task` | first | Pick a task from a multi-task `adarubric.yaml`. |
-| `--output` | `output` | Output root: results land in `<output>/<harness>/<task>/attempt-N/`. |
-| `--trials` | `1` | Repetitions inside this launch (agents are non-deterministic). |
-| `--timeout` | config/300 | Per-harness timeout in seconds. |
-| `--grade / --no-grade` | `--grade` | Run deterministic graders after the agent (verifier / config graders). |
-| `--env-file` | — | Load `KEY=VALUE` env vars (API keys) from a file; only the harness's declared key is injected. |
+| `<path>` | — | a skill folder or a SkillsBench task |
+| `--harness` | *(required)* | `claude-code` \| `gemini-cli` \| `codex` \| `acp` \| `oracle`. Comma-separate for several. Pin a model with `name:model`. No auto-detection. |
+| `--sandbox` | `local` | `local` (temp dir on your machine) or `docker` (container; required for SkillsBench) |
+| `--model` | *(agent's own)* | one model for every harness; `name:model` in `--harness` overrides it |
+| `--inject-skills` | `yes` | `no` withholds the skills — the control half of "did the skill help?". Takes yes/no, true/false, 1/0, on/off. |
+| `--dataset` | `auto` | `auto` detects the shape; `skillbench` / `generic` force or validate it |
+| `--instruction` | — | overrides `TASK.md` / `task.md` / the config |
+| `--task` | first | pick one task from a multi-task `adarubric.yaml` |
+| `--output` | `output` | results go to `<output>/<harness>/<task>/attempt-N/` |
+| `--trials` | `1` | repeats inside this launch |
+| `--timeout` | config/300 | seconds allowed per agent run |
+| `--grade / --no-grade` | `--grade` | run the checks after the agent finishes |
+| `--env-file` | — | load `KEY=VALUE` API keys from a file |
+
+**ACP-only flags** (see [`coding_agent_harness.md`](coding_agent_harness.md)):
+
+| Flag | Meaning |
+|------|---------|
+| `--acp-cmd` | the launch command, e.g. `'gemini --acp'`. Required for `--harness acp`. |
+| `--acp-skill-dir` | where the wrapped agent looks for skills, e.g. `.claude/skills`. **Get this wrong and it will never find the skill.** |
+| `--acp-env-key` | env var(s) the agent needs, so they're injected and checked up front |
+| `--acp-install` | for Docker: a **harness name** to reuse its installer (e.g. `gemini-cli`), or a shell snippet |
+| `--acp-name` | the label this run is filed under (default: derived, e.g. `acp-gemini`) |
+
+### `adarubric check`
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `<path>` | — | a SkillsBench task (needs `oracle/solve.sh`) |
+| `--sandbox` | `docker` | where to run it |
+| `--output` | `output` | where the check's own run lands |
+| `--timeout` | config | seconds allowed |
+
+Exits non-zero and says why if the task can't be passed even with the right answer.
 
 ---
 
 ## How it works
 
-Clean **Ports & Adapters** design — dependencies only ever point inward, so adding a harness, sandbox,
-or grader is one small file + one registry line, never a rewrite.
+**Ports & Adapters** — dependencies only point inward, so a new harness, sandbox or grader is one
+small file plus one registry line.
 
 ```
- CLI (cli.py — Typer)            parses flags → builds objects via registries → calls the runner
+ CLI (cli.py)              parse flags → build objects from registries → call the runner
         │
- ORCHESTRATION (runner.py)       EvalRunner drives a run using ONLY the contracts
+ ORCHESTRATION (runner.py) EvalRunner, which only ever touches the contracts
         │
- ADAPTERS (harnesses/ sandboxes/ grading/)   concrete plug-ins implementing the contracts
+ ADAPTERS (harnesses/ sandboxes/ grading/)   the concrete plug-ins
         │
- CORE (core/)                    models.py (pure dataclasses)  ·  contracts.py (Harness·Sandbox·Grader·LLM)
+ CORE (core/)              models.py (plain data)  ·  contracts.py (Harness·Sandbox·Grader·LLM)
 ```
 
-A single run, end to end:
+One run, start to finish:
 
 ```
-load_spec(path)  ──►  EvalSpec (normalized: skill folder OR SkillsBench task)
+load_spec(path)  ──►  EvalSpec (normalized: your skill OR a SkillsBench task)
+      │
+preflight the sandbox            ← Docker not running? stop here, write nothing
       │
 EvalRunner.run(harness, spec, trials):
-   create output/<harness>/<task>/attempt-N/   →  write eval.yaml manifest (host-only)
-   for each trial:
-     prepare  (docker build / no-op)     →  setup (temp ws; copy files; write .adarubric/prompt.md;
-                                             inject each skill into the harness's real skill dir)
-     snapshot files  →  harness.run(instruction, ws, run_command)  →  snapshot + diff
-     export workspace  →  GRADE (only now — the agent is gone; verifier staged AFTER export)
-     write run.json / transcript.json / changes.json / grading.json / prompt.md / raw.log
-     cleanup
+   make output/<harness>/<task>/attempt-N/  →  write eval.yaml (never enters the container)
+   per trial:
+     prepare   build the task image, then a thin layer adding the agent's CLI
+     setup     fresh container → copy input files → write the prompt →
+               copy each skill into the folder THAT agent looks in
+     snapshot files  →  the agent runs  →  snapshot again, diff
+     copy the agent's files out
+     GRADE     only now: the grader is copied in AFTER the agent is gone
+     write run.json / grading.json / transcript.json / changes.json / prompt.md / raw.log
+     destroy the container
 ```
 
-**Isolation is guaranteed:** the `verifier/`, `oracle/`, and the `eval.yaml` manifest are **never**
-placed in the agent's workspace — the grader is staged and run only *after* the agent finishes and its
-output has been captured (regression-tested with a "snoop" harness).
+**The agent can never see the answers.** `verifier/`, `oracle/` and `eval.yaml` are never in the
+container while the agent is alive. The grader arrives afterwards; the container is then destroyed.
+A test asserts a normal agent run stages nothing at all.
 
-**Prompt delivery:** the instruction is written to `.adarubric/prompt.md`; every harness reads it via
-stdin redirection (`cli … < .adarubric/prompt.md`) — cross-platform, container-safe, no shell escaping.
+**Line endings are cleaned** when the grader is copied in, so a dataset cloned on Windows can't
+silently break scoring.
+
+---
+
+## Telling *our* problems apart from *the agent's*
+
+The single most important thing this harness gets right: a score of 0 must mean the model got it
+wrong, not that your laptop misbehaved.
+
+| What happened | What you get |
+|---|---|
+| Docker isn't running | one clear line, exit 1, **nothing written** — no phantom failed run |
+| Docker dies mid-run | run aborts, the half-written folder is erased, the attempt number isn't used up |
+| the grader script crashes | `graded: false` + **"grading failed"**, never `reward: 0` |
+| the grader ran and the answer was wrong | a real `reward` — that's a genuine result |
+| copying the agent's files out fails | run still counts and is still scored; a note says the local copy is missing |
+| the task's own Dockerfile is broken | a real failed trial — that genuinely is the task's fault |
+
+`reward: 0.0` from AdaRubric now always means *the answer was checked and scored zero*.
+
+---
+
+## What a run leaves behind
+
+Filed by **harness → task → attempt → trial**. An *attempt* is one launch; a *trial* is one repeat
+inside it.
+
+```
+output/
+  claude-code/
+    invoice-fraud-detection/
+      attempt-1/
+        eval.yaml               # what was run (host-only; never in the container)
+        trial-1/
+          run.json              # every metric
+          grading.json          # reward + what each check said
+          transcript.json       # ordered event log, secrets redacted
+          changes.json          # files created / modified / deleted
+          raw.log               # the agent's raw output (for ACP: the full protocol transcript)
+          prompt.md             # the exact instruction it was given
+          workspace/            # the agent's final files, copied out
+        trial-2/ ...
+      attempt-2/ ...
+  status.json                   # live progress, read by the dashboard
+```
+
+ACP runs are labelled by the agent they wrap — `output/acp-gemini/`,
+`output/acp-claude-code-acp/` — so different agents don't pile into one folder.
+
+### The metrics that matter
+
+**`skill_opened`** — did the agent actually open a skill? `true` / `false` / `null`. `null` means the
+agent doesn't tell us enough to know; it is never guessed as `false`.
+
+**`skill_depth`** — *how* it used it. This is the interesting one:
+
+| value | meaning |
+|---|---|
+| `used` | read past `SKILL.md` into the detail files it links to |
+| `noticed` | opened `SKILL.md` only — **skimmed, not used** |
+| `not_opened` | skills were there and untouched |
+| `null` | this agent can't tell us |
+
+Why it exists: SkillsBench's own audit caught codex reading three `SKILL.md` front pages, never
+opening a single linked file, then writing code that ignored the advice — scored 0.45. A yes/no
+"opened a skill" calls that a success. `noticed` and `used` are different findings.
+
+**`num_turns`** — how many times the model replied. **One definition for every harness**, because
+each CLI means something different by "turn": codex's own counter tracks prompt cycles (always 1 for
+us) while claude counts model replies. Comparing those directly was meaningless.
+
+**Cost** — `cost_usd` when the agent reports its real spend (claude does; ACP agents do via the
+protocol), `estimated_cost_usd` from tokens × the price table otherwise.
+
+⚠️ Prices in [`core/pricing.py`](src/adarubric/core/pricing.py) are a **cached snapshot, not a live
+lookup** — verify before quoting them. Cached input (billed at ~10%) isn't modelled, so a
+cache-heavy run reads high. Reported cost always wins over estimated.
+
+**Model** — `model` is what the agent said it ran; `model_requested` is what you pinned. Kept apart
+so a pin that silently didn't take effect is visible. Some agents report a *routing mode* rather than
+a model (gemini says `auto`, claude-code-acp says `Default (recommended)`) — recorded as-is, but not
+priced, since there's no price for a mode.
+
+---
+
+## Harnesses
+
+Claude Code, Gemini CLI and Codex are built in. `--harness acp` drives **any**
+[ACP](https://agentclientprotocol.com/) agent with no per-agent code — including in Docker.
+
+```bash
+uv run adarubric run <task> --harness acp --acp-cmd 'gemini --acp' \
+    --acp-skill-dir '.gemini/skills' --acp-install gemini-cli \
+    --dataset skillbench --sandbox docker --env-file .env
+```
+
+Full guide, including adding your own: **[`coding_agent_harness.md`](coding_agent_harness.md)**.
+
+### What's actually been run
+
+Honest status — "verified" means a real end-to-end run, not just tests:
+
+| Harness | Verified | Notes |
+|---|---|---|
+| `claude-code` | ✅ Docker | reports real cost; strongest skill signal (names the `Skill` tool) |
+| `codex` | ✅ Docker | reports **no** model and no cost — cost is estimated from the pinned model |
+| `gemini-cli` | ✅ Docker | `skill_opened` measured from its tool tally; no cost reported |
+| `acp` + gemini | ⚠️ partial | reached the agent and ran; needs one clean end-to-end confirmation |
+| `acp` + claude | ⚠️ partial | completed and scored; skill detection not yet confirmed against real traffic |
+| `acp` + codex | ❌ not yet | |
+| `oracle` | ✅ Docker | used by `adarubric check` |
+
+The ACP client is built from the spec and tested against a mock agent. Real agents have already
+surfaced three things a mock can't (a rejected working directory, text split mid-word, tool IDs
+mistaken for tool names) — expect the occasional rough edge on a new agent, and check `raw.log`,
+which holds the full protocol transcript.
+
+---
+
+## Live dashboard
+
+One command, one page, updating as the run happens.
+
+```bash
+# terminal 1 — run
+uv run adarubric run <task> --harness gemini-cli --dataset skillbench --sandbox docker --env-file .env
+
+# terminal 2 — watch (opens http://127.0.0.1:8765)
+python dashboard/serve.py --output output
+```
+
+Every run writes `output/status.json` as it goes; the server rescans `output/` on each request and the
+page polls every ~2s, re-rendering **in place** — your scroll position and current page are kept.
+
+**Restart the server after upgrading** — a server left running from before serves the old page.
+
+Shows: runs, mean reward, **skill noticed vs actually used**, total cost and tokens; per-harness
+charts (reward, turns-to-answer, cost, tokens); and a runs table with turns, tokens, cost, time, file
+changes and **when it ran** (your local time, newest first, running jobs pinned on top).
+
+**Click any run** for its own page: every metric, the created/modified/deleted file lists, which skill
+files were read, a live "building / copying to docker / staging" timeline, and the log tail. Click a
+**task name** to see every run of that task side by side.
+
+- [`dashboard/serve.py`](dashboard/serve.py) — the server. Stdlib only, localhost by default
+  (`--host` / `--port` / `--no-open`).
+- [`dashboard/dashboard.html`](dashboard/dashboard.html) — the page. No dependencies, no dummy data,
+  light and dark.
 
 ---
 
@@ -226,182 +430,69 @@ stdin redirection (`cli … < .adarubric/prompt.md`) — cross-platform, contain
 ```
 AdaRubric-Skill-Eval/
   ReadMe.md
-  coding_agent_harness.md        how the harnesses work + how to add your own (incl. ACP)  ← start here for harnesses
-  dashboard/                     the live run-tracker UI (outside the package)
-    serve.py                     `python dashboard/serve.py` → live dashboard on http://localhost:8765
-    dashboard.html               the page (charts/logs/cost, per-task/run pages); polls /api/data
-  pyproject.toml                 Typer + uv; console script `adarubric`
+  coding_agent_harness.md        the harnesses + how to wire your own (incl. ACP)
+  dashboard/
+    serve.py                     live dashboard server
+    dashboard.html               the page
+  pyproject.toml                 console script `adarubric`
   src/adarubric/
-    cli.py                       Typer app (thin edge — parse flags, delegate)
+    cli.py                       Typer app: `run` and `check`
     runner.py                    EvalRunner — orchestration
-    loading.py                   path → EvalSpec (auto-detects skillbench vs generic)
+    loading.py                   path → EvalSpec
     core/
-      models.py                  pure dataclasses (RunOutput, EvalSpec, Trial, RunMeta, …)
-      contracts.py               Harness · Sandbox · Grader · LLM (abstract bases)
-      pricing.py                 token → cost estimation (editable table)
-    harnesses/                   claude.py  codex.py  gemini.py  + registry.py  (name → Harness)
-    sandboxes/                   local.py  docker.py               + registry.py  (name → Sandbox)
-    grading/                     deterministic.py                  + registry    (name → Grader)
-    reporting/                   terminal.py (live console progress)
-  tests/                         smoke + unit + docker-integration (gated by ADARUBRIC_DOCKER_TESTS=1)
-  dataset/                       cloned SkillsBench tasks (gitignored — large)
+      models.py                  plain dataclasses
+      contracts.py               Harness · Sandbox · Grader · LLM
+      errors.py                  SandboxUnavailable — our infra failing, not the agent
+      pricing.py                 token → cost (editable table)
+      skill_depth.py             noticed vs used
+    harnesses/                   claude.py codex.py gemini.py acp.py oracle.py + registry.py
+    sandboxes/                   local.py docker.py staging.py (line-ending cleanup) + registry.py
+    grading/                     deterministic.py + registry
+    reporting/                   terminal.py (console) · status.py (status.json for the dashboard)
+  tests/                         run with `uv run pytest` — no keys, no Docker
+  dataset/                       cloned SkillsBench tasks (gitignored, large)
 ```
-
-> Internal port notes live in `converting/` and are **not tracked** (gitignored). The public,
-> maintained docs are this README and `coding_agent_harness.md`.
 
 ---
 
-## Output layout — what a run leaves behind
+## Known rough edges
 
-Keyed by **harness → task → attempt → trial**, so comparing harnesses on the same task is trivial.
-An **attempt** is one launch of the command; a **trial** is one repetition inside it.
+Straight, so you're not surprised:
 
-```
-output/
-  claude-code/
-    dialogue-parser/
-      attempt-1/
-        eval.yaml               # the run definition + which harness/MODEL was used (host-only manifest)
-        trial-1/
-          run.json              # ALL metrics for the trial (RunMeta)
-          grading.json          # reward + per-grader results
-          transcript.json       # ordered, structured, secret-redacted event log
-          changes.json          # created / modified / deleted (snapshot-diff)
-          raw.log               # full raw harness stdout/stderr (redacted)
-          prompt.md             # the exact instruction given
-          workspace/            # the agent's FINAL, changed files (exported from the sandbox)
-        trial-2/ ...
-      attempt-2/ ...
-```
-
-> Keep a single `output/` — the `.gitignore` matches `output*/`, so it (and any stray `output2/`,
-> `output3/` from ad-hoc runs) stay out of git.
-
-### `eval.yaml` (the generated manifest)
-
-**AdaRubric generates this — you never write it** (your input is `adarubric.yaml` or the convention
-files). It's written to the attempt folder **before** any trial runs (host-only, never enters the
-sandbox) and records the task, mode, instruction, the **harness** (`id`, `cli`, requested `model`,
-`skill_dirs`, and env-var **names** — never values), the environment (sandbox, Dockerfile /
-base+setup), the injected skills, and grading pointers. After the trials finish, the actually-observed
-model(s) are added as `harness.model_observed` — so you can confirm which model really ran (useful
-when you let the CLI pick its own default).
-
-### `run.json` (metrics)
-
-One file, every metric; any field a harness can't report is `null` (never a misleading `false`):
-identity/reproducibility (`harness`, `sandbox`, `model`, `platform`, timestamps), outcome
-(`success`, `timed_out`, `error`, `graded`, `reward`), **usage** (`input/output/total_tokens`,
-`num_turns`, `num_tool_calls`, `cost_usd` reported + `estimated_cost_usd` computed + `cost_source`,
-`tool_counts`), **timing** (`total/setup/run/export_ms`), **skill_usage** (`skill_opened`,
-`skills_triggered`, `skill_files_read`), and the change summary.
-
-**`skill_opened`** = the agent explicitly invoked the `Skill` tool **or** read a `.../skills/<name>/…`
-file during the run — distinct from the harness auto-loading the skill *description* into context.
-Its observability differs per harness (Claude Code: definitive; Codex: partial; Gemini: unknown) — see
-[`coding_agent_harness.md`](coding_agent_harness.md).
-
----
-
-## Harnesses
-
-Claude Code, Gemini CLI, and Codex are built in. A **generic ACP harness** (`--harness acp`) runs
-**any** [Agent Client Protocol](https://agentclientprotocol.com/) agent (Zed agents, `gemini --acp`,
-and others) with no per-agent code — point it at a launch command:
-
-```bash
-uv run adarubric run <task> --harness acp --acp-cmd 'gemini --acp' \
-    --acp-skill-dir '.gemini/skills' --sandbox local --env-file .env
-```
-
-(ACP is `--sandbox local` only for now; a Docker bridge is a follow-up.) To use the built-ins, add
-your own adapter, or wire another ACP agent, see **[`coding_agent_harness.md`](coding_agent_harness.md)**.
-
-**Verified so far:** claude-code (local + Docker) and codex (local) have real end-to-end runs.
-**gemini-cli** was run once (Docker) which surfaced a headless folder-trust bug (exit 55) — now fixed
-(`GEMINI_CLI_TRUST_WORKSPACE=true`); re-run to confirm a clean success. Its `skill_opened` is now
-**measured** from `gemini -o json`'s complete tool tally (`stats.tools.byName` → `activate_skill`),
-not a design gap. See the verification table in [`coding_agent_harness.md`](coding_agent_harness.md).
-
----
-
-## Tracking UI
-
-Two UIs, for two moments:
-
-### 1. Live progress (during a run) — terminal
-
-While a run happens, [src/adarubric/reporting/terminal.py](src/adarubric/reporting/terminal.py)
-(`TerminalReporter`) prints each stage as it happens (the runner emits a `ProgressEvent` per stage):
-
-```
-> claude-code/dialogue-parser attempt 1
-  > trial 1
-      . preparing → setting_up → running → exporting → grading
-  = trial 1: done  reward=1.00
-```
-
-The final per-trial summary (score, tokens, cost, time, file changes) is printed by
-[cli.py](src/adarubric/cli.py). This stays in-package because the CLI imports it at runtime.
-
-### 2. The dashboard — one live server on a port — [`dashboard/`](dashboard/)
-
-One command, one live dashboard. Every `adarubric run` writes `output/status.json` as it happens
-(stages + a "what the sandbox is doing" activity feed); the dashboard server scans `output/` on every
-request and the page polls it, so you watch docker build, files copied to the container, the current
-stage, accuracy, turns, cost, and each trial finishing **live**.
-
-```bash
-# terminal 1 — run
-uv run adarubric run <task> --harness gemini-cli --dataset skillbench --sandbox docker --env-file .env
-
-# terminal 2 — start the live dashboard (opens your browser at http://127.0.0.1:8765)
-python dashboard/serve.py --output output
-```
-
-The page polls `/api/data` (a fresh scan of `output/`) every ~2s and re-renders **in place** — no
-reload, no dummy data — keeping your scroll position and whatever task/run page you're on.
-
-- **[dashboard/serve.py](dashboard/serve.py)** — the server: scans `output/` (handles both the
-  `attempt-N/trial-T/` and older `attempt-N/` layouts) and serves the page + the live `/api/data`.
-  Stdlib only, localhost-only by default (`--host`/`--port`/`--no-open` to change).
-- **[dashboard/dashboard.html](dashboard/dashboard.html)** — the UI (inline CSS/JS, no dependencies,
-  theme-aware); starts empty and fills in from `/api/data`.
-
-What it shows: KPI strip (runs, mean reward, skill-opened rate, total cost, total tokens),
-per-harness bar charts (mean reward, **mean turns-to-answer**, total cost, total tokens), and a
-filterable runs table with a **Turns** column.
-
-**Dedicated pages (click-through):** click a **run row** to open its own page — status, all metrics
-(turns / tool calls / commands, tokens, cost, reward + skill-usage), the **created / modified /
-deleted file lists**, a **"built / copied to docker / staged" activity timeline** for that run, and
-the `raw.log` excerpt; if it's still running, a live stage strip. Click a **task name** to open the
-task page listing every run/trial of that task (live + finished). Client-side routed via the URL hash.
-
-> The live *reporter* stays under `src/adarubric/` (the runner imports it at runtime to write
-> `status.json`); the *dashboard* that reads it is a standalone tool, so it lives outside the package.
+- **One image per task per agent.** 90 tasks × 3 agents = 270 images, ~1.5–1.9 GB each, and the agent
+  is re-downloaded for every task. Docker can't share the layer because each task has its own base.
+  Clean up as you go, or the disk fills.
+- **Prices are a cached snapshot** and don't model cached-input discounts.
+- **`skill_depth` measures which files were reached**, not whether the advice was followed. Judging
+  that needs a look at the work itself.
+- **Gemini can't report depth at all** — it gives tool counts with no file paths, so it maxes out at
+  `noticed`.
+- **ACP tokens vary by agent.** The protocol defines `usage` and a cost notification, and
+  claude-acp/codex-acp follow it; gemini-cli reports tokens off-spec and no cost
+  ([gemini-cli#24280](https://github.com/google-gemini/gemini-cli/issues/24280)).
+- **Activity feeds are per-invocation.** `status.json` is rewritten by each run, so an earlier run's
+  build/copy timeline is gone once you start another.
 
 ---
 
 ## Status
 
-Built piece by piece:
-
 | Phase | Status |
 |-------|--------|
-| **1 — Scaffold + Running** | 🟢 Complete — two pipelines (skillbench/generic), local + Docker sandboxes, claude/codex/gemini adapters, `--model` pin, YAML config, live terminal progress. |
-| **2 — Deterministic grading** | 🟢 Core built — SkillsBench verifier + config graders, isolation-guarded, weighted reward. |
-| 3 — LLM-rubric grading | ⚪ Planned |
-| 4 — Trials + aggregation (pass@k) | ⚪ Planned |
-| 5 — Validation (oracle) · 6 — Reporting · 7 — Init | ⚪ Planned |
+| **1 — Running** | 🟢 two pipelines, local + Docker, four harnesses + oracle, model pinning, skills on/off |
+| **2 — Deterministic grading** | 🟢 SkillsBench verifier + your own checks, isolation-guarded, "grading failed" separated from a real zero |
+| **5 — Task validation** | 🟢 `adarubric check` runs the reference solution before you spend anything |
+| 3 — LLM-rubric grading | ⚪ planned |
+| 4 — Aggregation (pass@k) | ⚪ planned |
+| 6 — Reporting · 7 — Init | ⚪ planned |
 
 ---
 
-## Security note
+## Security
 
-Never commit API keys. Pass them only via `--env-file`; the runner injects **only** the chosen
-harness's declared key into the sandbox, redacts secrets from logs/transcripts, and scrubs credential
-files (e.g. `.codex/auth.json`) from exported workspaces. If a key has ever been committed to any
-repo, rotate it.
-```
+Never commit API keys. Pass them with `--env-file` only. We inject just the one key that harness
+declares, redact secrets from logs and transcripts, and strip credential files (e.g.
+`.codex/auth.json`) from exported workspaces.
+
+**If a key has ever been pasted into a chat, a commit, or a screenshot, rotate it.** Treat it as
+public from that moment.

@@ -18,7 +18,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+# ruff is not cosmetic here: tests/test_no_undefined_names.py runs it so code that cannot possibly
+# work (undefined names, use-before-assignment) is caught by `pytest` rather than by a paid agent run.
+dev = ["pytest>=8.0", "ruff>=0.6"]
 
 [project.scripts]
 adarubric = "adarubric.cli:main"

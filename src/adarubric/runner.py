@@ -52,8 +52,10 @@ from adarubric.core.models import (
     Usage,
     WorkspaceChanges,
 )
-from adarubric.core.pricing import estimate_cost
+from adarubric.core.pricing import estimate_cost, is_specific_model
+from adarubric.core.skill_depth import classify as classify_skill_depth
 from adarubric.grading import create_grader
+from adarubric.harnesses.oracle import ORACLE_DIR
 
 
 def _now() -> str:
@@ -209,6 +211,19 @@ class EvalRunner:
         graded = False
         grading_error: str | None = None
 
+        # The oracle harness needs the task's reference solution inside the sandbox. Staged ONLY for
+        # that harness, before the snapshot so its own files aren't counted as the agent's changes.
+        # A real agent never reaches this branch, so a worked answer cannot leak into a scored run.
+        # Deliberately OUTSIDE the try below: asking for the oracle on a task that has none is a
+        # setup mistake, and must stop rather than be filed as a trial the oracle "failed".
+        if getattr(harness, "runs_oracle", False):
+            if not spec.oracle_path:
+                self.sandbox.cleanup(workspace)
+                raise RuntimeError(
+                    "harness 'oracle' needs the task's oracle/solve.sh, but this task has none"
+                )
+            self.sandbox.stage(workspace, str(Path(spec.oracle_path).parent), ORACLE_DIR)
+
         try:
             before = self.sandbox.list_files(workspace)
 
@@ -348,6 +363,9 @@ class EvalRunner:
                 + list(spec.workspace_map.values()),
             },
             "skills": [Path(p).name for p in spec.skill_paths],
+            # False = the skills above existed but were deliberately withheld (--inject-skills no).
+            # Without this line a control run is indistinguishable from a task that has no skills.
+            "skills_injected": spec.inject_skills,
             "grading": {
                 "verifier": spec.verifier_path,
                 "oracle": spec.oracle_path,
@@ -381,13 +399,21 @@ class EvalRunner:
         total_tok = run_output.total_tokens
         if total_tok is None and in_tok is not None and out_tok is not None:
             total_tok = in_tok + out_tok
-        est = estimate_cost(run_output.model, in_tok, out_tok)
+        # Price against the model we PINNED when the CLI doesn't name one. codex reports no model at
+        # all, so pricing only the observed name left every codex run showing no cost despite real
+        # token spend — and we do know what ran, because we passed it on the command line.
+        # ...and a reported name like "auto" or "Default (recommended)" is a routing MODE, not a model,
+        # so it can't be priced either — fall back to the pin in that case too.
+        reported = run_output.model if is_specific_model(run_output.model) else None
+        priced_model = reported or getattr(harness, "model", None)
+        est = estimate_cost(priced_model, in_tok, out_tok)
         cost_source = ("reported" if run_output.cost_usd is not None
                        else ("estimated" if est is not None else None))
         num_tool_calls = sum(run_output.tool_counts.values()) or (len(run_output.tools_used) or None)
 
         usage = Usage(
             input_tokens=in_tok, output_tokens=out_tok, total_tokens=total_tok,
+            cached_input_tokens=run_output.cached_input_tokens,
             num_turns=run_output.num_turns, num_tool_calls=num_tool_calls, num_commands=command_count,
             cost_usd=run_output.cost_usd, estimated_cost_usd=est, cost_source=cost_source,
             tools_used=list(run_output.tools_used), tool_counts=dict(run_output.tool_counts))
@@ -396,7 +422,9 @@ class EvalRunner:
         else:
             skill_opened = True if run_output.skills_triggered else None
         skill_usage = SkillUsage(
-            skill_opened=skill_opened, skills_triggered=list(run_output.skills_triggered),
+            skill_opened=skill_opened,
+            skill_depth=classify_skill_depth(skill_opened, list(run_output.skills_triggered)),
+            skills_triggered=list(run_output.skills_triggered),
             skill_files_read=list(run_output.skill_files_read),
             num_skill_files_read=len(run_output.skill_files_read))
         meta = RunMeta(
@@ -406,6 +434,7 @@ class EvalRunner:
             platform=platform.platform(), adarubric_version=__version__, started_at=started_at,
             ended_at=_now(), success=success, timed_out=timed_out, error=error,
             graded=graded, reward=reward, grading_error=grading_error, export_error=export_error,
+            skills_injected=spec.inject_skills,
             usage=usage, timing=timing, skill_usage=skill_usage,
             files_created=len(changes.created), files_modified=len(changes.modified),
             files_deleted=len(changes.deleted))

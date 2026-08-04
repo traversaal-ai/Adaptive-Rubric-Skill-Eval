@@ -12,6 +12,7 @@ from adarubric.harnesses.acp import AcpHarness
 from adarubric.harnesses.claude import ClaudeHarness
 from adarubric.harnesses.codex import CodexHarness
 from adarubric.harnesses.gemini import GeminiHarness
+from adarubric.harnesses.oracle import OracleHarness
 
 _REGISTRY: dict[str, Callable[[], Harness]] = {
     "claude-code": ClaudeHarness,
@@ -19,6 +20,9 @@ _REGISTRY: dict[str, Callable[[], Harness]] = {
     "codex": CodexHarness,
     # Generic ACP wrapper — drives any Agent Client Protocol agent (configure with --acp-cmd).
     "acp": AcpHarness,
+    # Not an agent: runs the task's own reference solution to prove the task can be passed at all.
+    # Free (no model, no key) — use it before spending money on agents.
+    "oracle": OracleHarness,
     # "opencode" is registered in a later piece.
 }
 

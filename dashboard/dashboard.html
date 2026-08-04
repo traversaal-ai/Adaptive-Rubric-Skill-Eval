@@ -343,6 +343,10 @@
     const meanReward = graded.length ? graded.reduce((a, r) => a + r.reward, 0) / graded.length : null;
     const known = runs.filter((r) => r.skill_opened === true || r.skill_opened === false);
     const opened = known.filter((r) => r.skill_opened === true).length;
+    // Of the runs that touched a skill, how many went deeper than its front page? That ratio is the
+    // real question — "noticed" is not "used".
+    const touched = runs.filter((r) => r.skill_depth === "used" || r.skill_depth === "noticed");
+    const reallyUsed = touched.filter((r) => r.skill_depth === "used").length;
     const broken = runs.filter((r) => r.grading_error).length;
     const cost = runs.reduce((a, r) => a + (r.cost_usd || 0), 0);
     const tokens = runs.reduce((a, r) => a + ((r.tokens && r.tokens.total) || 0), 0);
@@ -354,7 +358,10 @@
       // here, so a wall of "grading failed" can't masquerade as a healthy mean over 2 runs.
       { label: "Mean reward", value: meanReward == null ? "—" : meanReward.toFixed(2),
         foot: `${passed}/${graded.length} scored ≥ 0.80` + (broken ? ` · ${broken} grading failed` : ""), accent: true },
-      { label: "Skill-opened", value: known.length ? Math.round(100*opened/known.length) + "%" : "—", foot: `${opened}/${known.length} observed`, accent: false },
+      { label: "Skill noticed", value: known.length ? Math.round(100*opened/known.length) + "%" : "—",
+        foot: `${opened}/${known.length} observed`, accent: false },
+      { label: "Actually used", value: touched.length ? Math.round(100*reallyUsed/touched.length) + "%" : "—",
+        foot: touched.length ? `${reallyUsed}/${touched.length} read past SKILL.md` : "no depth data yet", accent: false },
       { label: "Total cost", value: cost ? "$" + cost.toFixed(2) : "—", foot: "reported + estimated", accent: false },
       { label: "Total tokens", value: fmtInt(tokens), foot: "in + out, all runs", accent: false },
     ];
@@ -413,10 +420,20 @@
     if (!r.success) return `<span class="pill bad"><span class="dot"></span>failed</span>`;
     return `<span class="pill ok"><span class="dot"></span>success</span>`;
   }
+  // "noticed" and "used" are different findings: reading a skill's front page and then ignoring it
+  // is not skill use. Only "used" means the agent went past SKILL.md into the detail it links to.
+  const SKILL_STATES = {
+    used:       { cls: "sig",  label: "used",       tip: "read past SKILL.md into the skill's detail files" },
+    noticed:    { cls: "warn", label: "noticed",    tip: "opened SKILL.md but never its linked detail — skimmed, not used" },
+    not_opened: { cls: "mute", label: "not opened", tip: "skills were available and never touched" },
+  };
   function skillPill(r) {
-    if (r.skill_opened === true) return `<span class="pill sig">opened</span>`;
+    const s = SKILL_STATES[r.skill_depth];
+    if (s) return `<span class="pill ${s.cls}" title="${s.tip}">${s.label}</span>`;
+    // No depth recorded (older run, or a harness that reports tallies without file paths).
+    if (r.skill_opened === true) return `<span class="pill sig" title="opened; depth unknown">opened</span>`;
     if (r.skill_opened === false) return `<span class="pill mute">not opened</span>`;
-    return `<span class="pill mute" title="harness exposes no trajectory">unknown</span>`;
+    return `<span class="pill mute" title="this harness exposes no trajectory, so we cannot tell">unknown</span>`;
   }
   function rewardCell(r) {
     // A broken check script is OUR failure, not the model's — it must never render as a red 0.00,
@@ -521,7 +538,8 @@
     const cells = [
       ["Status", t ? (t.stage || "running") : (r.timed_out ? "timed out" : (r.success ? "success" : "failed"))],
       ["Reward", r.graded ? fmtReward(r.reward) : (r.grading_error ? "grading failed" : "ungraded")],
-      ["Skill opened", r.skill_opened === true ? "yes" : r.skill_opened === false ? "no" : "unknown"],
+      ["Skill", (SKILL_STATES[r.skill_depth] || {}).label
+        || (r.skill_opened === true ? "opened" : r.skill_opened === false ? "not opened" : "unknown")],
       ["Turns", r.turns == null ? "—" : r.turns],
       ["Tool calls", r.tool_calls == null ? "—" : r.tool_calls],
       ["Commands", r.commands == null ? "—" : r.commands],
@@ -554,6 +572,11 @@
             <div class="fact"><span class="fk">Started</span><span class="fv">${esc(fmtFull(r.started_at))}${r.started_at ? ` <span class="dim">(${esc(fmtAgo(r.started_at))})</span>` : ""}</span></div>
             <div class="fact"><span class="fk">Ended</span><span class="fv">${t ? "still running" : esc(fmtFull(r.ended_at))}</span></div>
             <div class="fact"><span class="fk">Model</span><span class="fv">${esc(modelLabel(r))}<span class="dim"> — ${esc(modelTitle(r))}</span></span></div>
+            <div class="fact"><span class="fk">Skill files read</span><span class="fv">${
+              (r.skill_files || []).length
+                ? esc((r.skill_files || []).slice(0, 8).join(", "))
+                : '<span class="dim">none recorded — which is why depth may read "noticed" or "unknown"</span>'
+            }</span></div>
             <div class="fact"><span class="fk">Tools</span><span class="fv">${toolsStr(r)}</span></div>
             <div class="fact"><span class="fk">Cost source</span><span class="fv">${esc(r.cost_source || "n/a")}</span></div>
             ${r.export_error ? `<div class="fact"><span class="fk">Saved files</span><span class="fv">Couldn't copy the agent's files out of the container, so you may not be able to browse them below.<br><span class="dim">The run itself finished and the score is real — only your local copy of the files is missing. Reason: ${esc(r.export_error)}</span></span></div>` : ""}

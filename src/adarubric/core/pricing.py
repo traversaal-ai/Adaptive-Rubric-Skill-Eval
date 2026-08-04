@@ -11,6 +11,7 @@ against current pricing before relying on the numbers.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -60,8 +61,28 @@ def register_price(model_prefix: str, input_per_mtok: float, output_per_mtok: fl
     PRICES[model_prefix] = ModelPrice(input_per_mtok, output_per_mtok)
 
 
+#: Names that are a *setting*, not a model. gemini reports "auto" (its recommended mode, which routes
+#: each prompt to Flash or Pro), and claude-code-acp reports "Default (recommended)". Both are honest
+#: — but there is no price for a routing mode, and matching one to a price table would be fiction.
+#: Word-by-word, so "Default (recommended)" is caught as well as a bare "default".
+_NOT_A_MODEL = ("auto", "default", "recommended", "unknown", "none", "unspecified")
+#: Whole-string forms that survive word-splitting, e.g. "n/a" -> "na".
+_NOT_A_MODEL_FLAT = ("na", "tbd", "")
+
+
+def is_specific_model(model: str | None) -> bool:
+    """False for routing labels like ``auto`` — truthful names that cannot be priced."""
+    if not model or not model.strip():
+        return False
+    low = model.lower()
+    if re.sub(r"[^a-z0-9]+", "", low) in _NOT_A_MODEL_FLAT:
+        return False
+    words = re.sub(r"[^a-z0-9]+", " ", low).split()
+    return bool(words) and not all(word in _NOT_A_MODEL for word in words)
+
+
 def _lookup(model: str | None) -> ModelPrice | None:
-    if not model:
+    if not is_specific_model(model):
         return None
     # Longest-prefix match so "anthropic.claude-opus-4-8-2026..." still resolves.
     best: tuple[int, ModelPrice] | None = None

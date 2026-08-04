@@ -12,6 +12,7 @@ Imports only the data models — never an adapter.
 
 from __future__ import annotations
 
+import subprocess
 from abc import ABC, abstractmethod
 from typing import Callable, Protocol
 
@@ -150,6 +151,18 @@ class Sandbox(ABC):
     ) -> ShellResult:
         """Run ``command`` inside ``workspace`` and capture stdout/stderr/exit code."""
         raise NotImplementedError
+
+    def popen(
+        self, workspace: str, command: str, env: dict[str, str] | None = None
+    ) -> "subprocess.Popen[str]":
+        """Start a LONG-LIVED process in ``workspace`` with pipes on stdin/stdout/stderr.
+
+        ``run_command`` is fire-and-forget: send a command, wait, read the output. That cannot host a
+        conversation. ACP agents need the opposite — a process that stays alive while both sides
+        exchange messages — so this is the seam for them. Local runs it with ``cwd``; Docker wraps it
+        in ``docker exec -i``, which is what lets an ACP agent run against a container.
+        """
+        raise NotImplementedError(f"{self.name} sandbox cannot host an interactive process")
 
     def stage(self, workspace: str, host_src: str, dest: str) -> None:
         """Copy a host path INTO the sandbox at ``dest`` — used to place the grader/verifier AFTER

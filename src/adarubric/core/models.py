@@ -59,6 +59,7 @@ class RunOutput:
     input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
+    cached_input_tokens: int | None = None  # input served from the prompt cache, when reported
     # Measured skill-usage signal (set when the harness can parse its trajectory, e.g. stream-json).
     # None = the harness couldn't determine it; True/False = definitively measured.
     skill_opened: bool | None = None
@@ -122,6 +123,15 @@ class Usage:
     input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
+    #: Input tokens served from the provider's prompt cache, when reported. Cached input bills at a
+    #: fraction of the normal rate, so a run with heavy caching costs far less than input_tokens
+    #: alone suggests — recorded here so the estimate can be judged (or corrected) rather than
+    #: silently reading high.
+    cached_input_tokens: int | None = None
+    #: How many times the MODEL produced a reply. Deliberately one definition across every harness,
+    #: because each CLI means something different by "turn": codex's own turn counter tracks prompt
+    #: cycles (always 1 for us), while claude counts model replies. Comparing those directly is
+    #: meaningless, so every adapter reports model replies here.
     num_turns: int | None = None
     num_tool_calls: int | None = None
     num_commands: int = 0
@@ -150,6 +160,10 @@ class SkillUsage:
     """
 
     skill_opened: bool | None = None
+    #: How deeply: "used" (went past the front page) | "noticed" (front page only) | "not_opened" |
+    #: None (harness can't tell). ``skill_opened`` alone can't separate skimming the headings from
+    #: working from the detail, and only the second is skill use — see ``core/skill_depth.py``.
+    skill_depth: str | None = None
     skills_triggered: list[SkillTrigger] = field(default_factory=list)
     skill_files_read: list[str] = field(default_factory=list)  # SKILL.md, references/*, …
     num_skill_files_read: int = 0
@@ -198,6 +212,10 @@ class RunMeta:
     #: itself still happened and is still scored, because the grader reads the live container, not
     #: the export. A failed copy must never discard a completed run.
     export_error: str | None = None
+    #: False when ``--inject-skills no`` withheld the task's skills. Essential context for the score:
+    #: a low reward means something completely different depending on whether the agent was given the
+    #: guidance. Comparing the two conditions is what measures a skill's worth.
+    skills_injected: bool = True
     # analysis
     usage: Usage = field(default_factory=Usage)
     timing: Timing = field(default_factory=Timing)
@@ -305,6 +323,11 @@ class EvalSpec:
     name: str
     instruction: str
     skill_paths: list[str] = field(default_factory=list)  # skill dirs to inject
+    #: Whether to actually place those skills where the agent can find them. ``--inject-skills no``
+    #: sets this False to run the SAME task with the guidance withheld, which is the control half of
+    #: "did the skill help?". ``skill_paths`` is deliberately left populated so the record still shows
+    #: WHICH skills were withheld — a no-skill run must not look like a task that has no skills.
+    inject_skills: bool = True
     workspace_files: list[str] = field(default_factory=list)  # files/dirs copied in (dest = basename)
     workspace_map: dict[str, str] = field(default_factory=dict)  # src -> explicit relative dest
 
