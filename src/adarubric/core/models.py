@@ -52,7 +52,8 @@ class RunOutput:
     skills_triggered: list[SkillTrigger] = field(default_factory=list)
     tools_used: list[str] = field(default_factory=list)
     tool_counts: dict[str, int] = field(default_factory=dict)
-    num_turns: int | None = None
+    num_turns: int | None = None            # computed by the adapter (model replies)
+    num_turns_reported: int | None = None   # what the CLI said, verbatim
     duration_api_ms: float | None = None
     cost_usd: float | None = None
     model: str | None = None
@@ -128,11 +129,14 @@ class Usage:
     #: alone suggests — recorded here so the estimate can be judged (or corrected) rather than
     #: silently reading high.
     cached_input_tokens: int | None = None
-    #: How many times the MODEL produced a reply. Deliberately one definition across every harness,
-    #: because each CLI means something different by "turn": codex's own turn counter tracks prompt
-    #: cycles (always 1 for us), while claude counts model replies. Comparing those directly is
-    #: meaningless, so every adapter reports model replies here.
+    #: Model replies, computed by US with one definition for every harness (core/turns.py). This is
+    #: the comparable number. `None` only when the agent's output shows nothing to count.
     num_turns: int | None = None
+    #: What the agent CLAIMED, in its own words — kept because it is a different fact, not a worse one.
+    #: They disagree: on one run claude reported 20 while the real reply count was 15, and codex
+    #: reported 1 because its counter tracks prompt cycles. Recording both makes that visible instead
+    #: of forcing a choice between two numbers that measure different things.
+    num_turns_reported: int | None = None
     num_tool_calls: int | None = None
     num_commands: int = 0
     cost_usd: float | None = None  # reported by the harness, when available

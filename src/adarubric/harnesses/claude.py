@@ -76,12 +76,20 @@ def parse_stream_json(stdout: str, stderr: str = "", exit_code: int = 0) -> RunO
     text_parts: list[str] = []
     result_obj: dict = {}
     model: str | None = None
+    #: One model reply can arrive as SEVERAL `assistant` events — one per content block (a text block,
+    #: then a tool_use block, ...). They share a message id, so distinct ids = distinct replies. On a
+    #: real run that was 34 events / 15 ids, while claude's own `num_turns` said 20 (it counts its
+    #: internal steps, including tool-result messages). We report both; see core/turns.py.
+    reply_ids: list[str] = []
 
     for ev in events:
         etype = ev.get("type")
         if etype == "system" and not model:
             model = ev.get("model")
         elif etype == "assistant":
+            msg_id = ((ev.get("message") or {}).get("id"))
+            if msg_id and msg_id not in reply_ids:
+                reply_ids.append(str(msg_id))
             for block in (ev.get("message") or {}).get("content", []) or []:
                 btype = block.get("type")
                 if btype == "text":
@@ -107,7 +115,9 @@ def parse_stream_json(stdout: str, stderr: str = "", exit_code: int = 0) -> RunO
         model=model,
         input_tokens=usage.get("input_tokens"),
         output_tokens=usage.get("output_tokens"),
-        num_turns=result_obj.get("num_turns"),
+        # Ours (comparable) and claude's own (different definition) — both kept.
+        num_turns=len(reply_ids) or None,
+        num_turns_reported=result_obj.get("num_turns"),
         cost_usd=result_obj.get("total_cost_usd"),
         tools_used=sorted(tool_counts),
         tool_counts=tool_counts,

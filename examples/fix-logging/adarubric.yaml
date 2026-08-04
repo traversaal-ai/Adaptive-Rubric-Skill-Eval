@@ -1,0 +1,39 @@
+# A code-fixing task. This shape (one config file) is what you need when the agent must start with
+# files already in the workspace — the plain TASK.md + grader.yaml folder can't ship those.
+#
+# The agent gets orders.py (full of print statements) and applog.py (the house logger).
+# It does NOT get this file, or the skills/ folder's own control files.
+
+instruction: |
+  orders.py is full of leftover print statements from debugging. Clean it up.
+
+  Keep the program working: `python orders.py` must still run without errors.
+
+# Files copied into the workspace before the agent starts. Left side is relative to this file,
+# right side is where it lands in the workspace.
+workspace:
+  - fixtures/orders.py:orders.py
+  - fixtures/applog.py:applog.py
+
+timeout: 300
+
+# Runs after the agent is gone, in the finished workspace. Prints {"score": 0..1}.
+# Written as a python one-liner so it behaves the same under bash and Windows cmd.
+graders:
+  - type: deterministic
+    weight: 1.0
+    run: >-
+      python -c "import json,os,re,subprocess,sys;
+      p='orders.py';
+      t=open(p,encoding='utf-8').read() if os.path.exists(p) else '';
+      q=chr(39)+chr(34);
+      names=re.findall('applog[.]event[(]\s*['+q+']([^'+q+']*)',t);
+      r=subprocess.run([sys.executable,p],capture_output=True) if t else None;
+      c=[('file-exists',bool(t)),
+      ('no-print','print(' not in t),
+      ('uses-applog','import applog' in t),
+      ('all-four-logged',len(names)>=4),
+      ('event-names',bool(names) and all(re.fullmatch('[a-z]+(_[a-z]+)+',n) for n in names)),
+      ('still-runs',bool(r) and r.returncode==0)];
+      n=sum(1 for _,v in c if v);
+      print(json.dumps({'score':round(n/len(c),2),'details':'; '.join(('ok ' if v else 'MISS ')+k for k,v in c)}))"

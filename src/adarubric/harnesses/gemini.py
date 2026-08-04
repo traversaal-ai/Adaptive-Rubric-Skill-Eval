@@ -114,6 +114,8 @@ def parse_gemini_output(stdout: str, stderr: str = "") -> RunOutput | None:
         model=model,
         input_tokens=in_tok or None,
         output_tokens=out_tok or None,
+        # gemini exposes no turn field, but one API request IS one model call, so this is
+        # exactly the shared definition — nothing inferred.
         num_turns=turns or None,
         tools_used=sorted(tool_counts),
         tool_counts=tool_counts,

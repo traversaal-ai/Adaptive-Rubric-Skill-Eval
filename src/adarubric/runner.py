@@ -414,7 +414,8 @@ class EvalRunner:
         usage = Usage(
             input_tokens=in_tok, output_tokens=out_tok, total_tokens=total_tok,
             cached_input_tokens=run_output.cached_input_tokens,
-            num_turns=run_output.num_turns, num_tool_calls=num_tool_calls, num_commands=command_count,
+            num_turns=run_output.num_turns, num_turns_reported=run_output.num_turns_reported,
+            num_tool_calls=num_tool_calls, num_commands=command_count,
             cost_usd=run_output.cost_usd, estimated_cost_usd=est, cost_source=cost_source,
             tools_used=list(run_output.tools_used), tool_counts=dict(run_output.tool_counts))
         if run_output.skill_opened is not None:
@@ -423,7 +424,8 @@ class EvalRunner:
             skill_opened = True if run_output.skills_triggered else None
         skill_usage = SkillUsage(
             skill_opened=skill_opened,
-            skill_depth=classify_skill_depth(skill_opened, list(run_output.skills_triggered)),
+            skill_depth=classify_skill_depth(skill_opened, list(run_output.skills_triggered),
+                                             spec.skill_paths),
             skills_triggered=list(run_output.skills_triggered),
             skill_files_read=list(run_output.skill_files_read),
             num_skill_files_read=len(run_output.skill_files_read))

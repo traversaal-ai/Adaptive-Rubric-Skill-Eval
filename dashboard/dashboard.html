@@ -159,6 +159,12 @@
 
   /* "When" column: absolute time on top (scannable, sortable), relative age underneath (what you
      actually glance at). Nowrap so a run's date never wraps into two lines mid-table. */
+  /* Two turn columns, deliberately distinguishable: ours is the comparable measurement, the
+     agent's is its own claim. Showing them side by side is the whole point. */
+  .colsub { font-size: 9.5px; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--faint); margin-top: 1px; }
+  .colsub.ours { color: var(--signal); }
+  td.ours-cell { color: var(--signal); font-weight: 600; }
+
   .when-cell { white-space: nowrap; font-size: 12px; }
   .when-cell .ago { font-size: 10px; color: var(--faint); margin-top: 2px; }
 
@@ -255,19 +261,22 @@
     <div class="section-h"><h2>By harness</h2><span class="hint">aggregated across all runs</span></div>
     <div class="charts">
       <div class="chart"><h3>Mean reward</h3><div class="bars" id="c-reward"></div></div>
-      <div class="chart"><h3>Mean turns to answer</h3><div class="bars" id="c-turns"></div></div>
+      <div class="chart"><h3>Mean turns to answer (we measured)</h3><div class="bars" id="c-turns"></div></div>
       <div class="chart"><h3>Total cost (USD)</h3><div class="bars" id="c-cost"></div></div>
       <div class="chart"><h3>Total tokens</h3><div class="bars" id="c-tokens"></div></div>
     </div>
 
-    <div class="section-h"><h2>Runs</h2><span class="hint">click a row to open its dedicated page</span></div>
+    <div class="section-h"><h2>Runs</h2><span class="hint">click a row to open its dedicated page · <strong>Turns “we measured”</strong> is counted by AdaRubric from each agent's output, one definition for all of them — the agent's own figure is shown beside it for comparison</span></div>
     <div class="panel">
       <div class="filters" id="filters"></div>
       <div class="table-scroll">
         <table>
           <thead><tr>
             <th>Status</th><th>Harness</th><th>Task</th><th>Model</th><th>Env</th>
-            <th>Reward</th><th>Skill</th><th class="r">Turns</th><th class="r">Tokens</th><th class="r">Cost</th>
+            <th>Reward</th><th>Skill</th>
+            <th class="r" title="Model replies, counted by AdaRubric from the agent's own output. One definition for every agent, so these are comparable with each other.">Turns<div class="colsub ours">we measured</div></th>
+            <th class="r" title="What the agent says about itself. Each vendor counts something different — claude counts internal steps, codex counts prompt cycles — which is why it disagrees with ours.">Turns<div class="colsub">agent claims</div></th>
+            <th class="r">Tokens</th><th class="r">Cost</th>
             <th class="r">Time</th><th class="r">Δ files</th><th>When</th>
           </tr></thead>
           <tbody id="rows"></tbody>
@@ -294,6 +303,18 @@
   // Model naming: prefer what the CLI reported it actually ran; fall back to what we pinned; only
   // then admit we don't know. Never print "default" — that's not the name of any model, and it hid
   // the fact that some harnesses simply don't report one.
+  // Turns = model replies, counted by us the same way for every agent. Each agent's own figure
+  // measures something else (claude counts internal steps, codex counts prompt cycles), so both are
+  // shown rather than picking one and hiding the disagreement.
+  const turnsTip = (r) =>
+    r.turns == null ? "this agent's output shows nothing to count"
+    : r.turns_reported == null ? `${r.turns} model replies (this agent reports no turn count of its own)`
+    : r.turns_reported === r.turns ? `${r.turns} model replies — the agent agrees`
+    : `${r.turns} model replies (we counted); the agent reported ${r.turns_reported}, which counts something else`;
+  const claimTip = (r) =>
+    r.turns_reported == null ? "this agent reports no turn count of its own"
+    : r.turns_reported === r.turns ? "the agent's own figure agrees with ours"
+    : `the agent says ${r.turns_reported}; we counted ${r.turns} model replies. Its number measures something else — claude counts internal steps, codex counts prompt cycles.`;
   const modelName = (r) => r.model || r.model_requested || null;
   const modelLabel = (r) => modelName(r) || "unreported";
   const modelTitle = (r) =>
@@ -430,10 +451,20 @@
   function skillPill(r) {
     const s = SKILL_STATES[r.skill_depth];
     if (s) return `<span class="pill ${s.cls}" title="${s.tip}">${s.label}</span>`;
-    // No depth recorded (older run, or a harness that reports tallies without file paths).
-    if (r.skill_opened === true) return `<span class="pill sig" title="opened; depth unknown">opened</span>`;
-    if (r.skill_opened === false) return `<span class="pill mute">not opened</span>`;
-    return `<span class="pill mute" title="this harness exposes no trajectory, so we cannot tell">unknown</span>`;
+    // Only reached when the harness told us nothing at all — one vocabulary, never a second word
+    // for the same thing (the server derives depth for older runs).
+    return `<span class="pill mute" title="this agent exposes no trajectory, so we cannot tell">unknown</span>`;
+  }
+  // "—" for cost is ambiguous: free, or unreported? Say which.
+  function costCell(r) {
+    if (r.cost_usd != null) {
+      const how = r.cost_source === "reported" ? "reported by the agent" : "estimated from tokens x price table";
+      return `<span title="${how}">${fmtCost(r.cost_usd)}</span>`;
+    }
+    const why = (r.tokens && r.tokens.total)
+      ? "this agent reports tokens but no cost, and no price is known for its model"
+      : "this agent reports no tokens and no cost, so there is nothing to compute from";
+    return `<span class="dim" title="${why}">not reported</span>`;
   }
   function rewardCell(r) {
     // A broken check script is OUR failure, not the model's — it must never render as a red 0.00,
@@ -473,9 +504,14 @@
         <td class="dim">${esc(r.sandbox)}</td>
         <td>${rewardCell(r)}</td>
         <td>${skillPill(r)}</td>
-        <td class="r mono">${r.turns == null ? '<span class="dim">—</span>' : r.turns}</td>
+        <td class="r mono ours-cell" title="${esc(turnsTip(r))}">${r.turns == null ? '<span class="dim">—</span>' : r.turns}</td>
+        <td class="r mono" title="${esc(claimTip(r))}">${
+          r.turns_reported == null
+            ? '<span class="dim" title="this agent reports no turn count of its own">not reported</span>'
+            : `${r.turns_reported}${r.turns != null && r.turns_reported !== r.turns
+                ? '<div class="ago">disagrees</div>' : ''}`}</td>
         <td class="r mono">${fmtInt(r.tokens && r.tokens.total)}</td>
-        <td class="r mono">${fmtCost(r.cost_usd)}</td>
+        <td class="r mono">${costCell(r)}</td>
         <td class="r mono">${r.running ? fmtElapsed(r.started_at) : fmtTime(r.time_s)}</td>
         <td class="r mono dim">+${cN(r,'created')}/~${cN(r,'modified')}/-${cN(r,'deleted')}</td>
         <td class="when-cell" title="${esc(fmtFull(r.started_at))}">${fmtWhen(r.started_at)}<div class="ago">${esc(fmtAgo(r.started_at))}</div></td>
@@ -540,11 +576,12 @@
       ["Reward", r.graded ? fmtReward(r.reward) : (r.grading_error ? "grading failed" : "ungraded")],
       ["Skill", (SKILL_STATES[r.skill_depth] || {}).label
         || (r.skill_opened === true ? "opened" : r.skill_opened === false ? "not opened" : "unknown")],
-      ["Turns", r.turns == null ? "—" : r.turns],
+      ["Turns (model replies)", r.turns == null ? "—" : r.turns],
+      ["Turns the agent claims", r.turns_reported == null ? "not reported" : r.turns_reported],
       ["Tool calls", r.tool_calls == null ? "—" : r.tool_calls],
       ["Commands", r.commands == null ? "—" : r.commands],
       ["Tokens", fmtInt(r.tokens && r.tokens.total)],
-      ["Cost", fmtCost(r.cost_usd)],
+      ["Cost", costCell(r)],
       ["Time", t ? fmtElapsed(r.started_at) : fmtTime(r.time_s)],
       ["Started", fmtWhen(r.started_at)],
       ["Ended", t ? "running…" : fmtWhen(r.ended_at)],

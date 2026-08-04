@@ -149,7 +149,7 @@ def _load_config(d: Path, cfg_path: Path, instruction: str | None, task: str | N
         skill_paths, folder_name = _detect_skills(d)
         name = task_def.get("name") or raw.get("name") or folder_name
     if not skill_paths:
-        raise ValueError(f"No skill found for {cfg_path} — add a `skill:` path or a SKILL.md.")
+        raise ValueError(f"No skill found for {cfg_path} - add a `skill:` path or a SKILL.md.")
 
     # Graders (compact all-in-one shape): tasks[].graders or top-level graders.
     graders = _parse_graders(task_def.get("graders") or raw.get("graders") or [])
@@ -182,8 +182,9 @@ def _load_convention_folder(d: Path, instruction: str | None) -> EvalSpec:
     skill_paths, name = _detect_skills(d)
     if not skill_paths:
         raise ValueError(
-            f"No skill found in {d} — looked for SKILL.md at the root or under "
-            f"skills/, .claude/skills/, .agents/skills/."
+            f"No skill found in {d} - looked for SKILL.md at the root, or one level under "
+            f"skills/, .claude/skills/, .agents/skills/. For a skill somewhere else, point the "
+            f"path straight at its SKILL.md, or add `skill: <path>` to an adarubric.yaml."
         )
 
     task_md = d / "TASK.md"
@@ -193,7 +194,7 @@ def _load_convention_folder(d: Path, instruction: str | None) -> EvalSpec:
         instr = _strip_frontmatter(task_md.read_text(encoding="utf-8")).strip()
     else:
         raise ValueError(
-            f"No instruction for {d} — add a TASK.md, an adarubric.yaml, or pass --instruction."
+            f"No instruction for {d} - add a TASK.md, an adarubric.yaml, or pass --instruction."
         )
     if not instr:
         raise ValueError(f"TASK.md in {d} is empty — provide an instruction.")

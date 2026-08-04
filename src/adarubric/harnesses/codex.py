@@ -19,6 +19,7 @@ import re
 
 from adarubric.core.contracts import PROMPT_RELPATH, Harness, RunCommand
 from adarubric.core.models import RunOutput, SkillTrigger, TriggerSource
+from adarubric.core.turns import ReplyCounter
 
 _SKILL_PATH_RE = re.compile(r"[\\/]\.(?:claude|agents|gemini|codex)[\\/]skills[\\/]([^\\/\s'\"]+)")
 _SKILL_MARKER_RE = re.compile(r"<skill>\s*<name>([^<]+)</name>", re.DOTALL)
@@ -81,7 +82,9 @@ def parse_codex_jsonl(stdout: str, stderr: str = "") -> RunOutput:
     seen: set[tuple] = set()
     messages: list[str] = []
     errors: list[str] = []
-    in_tok = out_tok = turns = cached_in = 0
+    in_tok = out_tok = cached_in = 0
+    prompt_cycles = 0            # codex's own `turn.completed` count — NOT model replies
+    replies = ReplyCounter()     # ours: see core/turns.py
     parsed_any = False
     model: str | None = None
 
@@ -102,12 +105,10 @@ def parse_codex_jsonl(stdout: str, stderr: str = "") -> RunOutput:
             itype = item.get("type")
             if itype == "agent_message" and item.get("text"):
                 messages.append(item["text"])
-                # One model reply == one turn. Codex's own `turn.completed` counts PROMPT cycles, so
-                # it is always 1 for our single-prompt runs — a 10-command session reported "1 turn"
-                # while claude reported 12 for comparable work, making the column meaningless.
-                turns += 1
+                replies.output()
             elif itype == "command_execution":
                 tool_counts["command_execution"] = tool_counts.get("command_execution", 0) + 1
+                replies.finished(str(item.get("id") or ""))
                 m = _SKILL_PATH_RE.search(item.get("command") or "")
                 if m and ("read", m.group(1)) not in seen:
                     seen.add(("read", m.group(1)))
@@ -121,8 +122,16 @@ def parse_codex_jsonl(stdout: str, stderr: str = "") -> RunOutput:
             elif itype in ("tool_use", "function_call"):
                 tname = item.get("name") or "unknown"
                 tool_counts[tname] = tool_counts.get(tname, 0) + 1
+        elif etype == "item.started":
+            # A tool the model just asked for. Marks the reply as open until the item completes, so a
+            # batch of commands with no commentary still counts as exactly one reply.
+            if (item.get("type") or "") in ("command_execution", "tool_use", "function_call"):
+                replies.started(str(item.get("id") or ""))
+            elif item.get("type") == "agent_message":
+                replies.output()
         elif etype == "turn.completed":
-            # Usage only — NOT a turn count (see the agent_message branch above).
+            prompt_cycles += 1
+            # Usage only — NOT a model-reply count (see core/turns.py).
             usage = ev.get("usage") or {}
             in_tok += usage.get("input_tokens") or 0
             out_tok += usage.get("output_tokens") or 0
@@ -155,7 +164,8 @@ def parse_codex_jsonl(stdout: str, stderr: str = "") -> RunOutput:
         input_tokens=in_tok or None,
         output_tokens=out_tok or None,
         cached_input_tokens=cached_in or None,
-        num_turns=turns or None,
+        num_turns=replies.value,
+        num_turns_reported=prompt_cycles or None,
         tools_used=sorted(tool_counts),
         tool_counts=tool_counts,
         skills_triggered=skills,

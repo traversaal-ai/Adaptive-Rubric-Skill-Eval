@@ -41,6 +41,7 @@ from typing import Callable, Protocol
 
 from adarubric.core.contracts import Harness, RunCommand
 from adarubric.core.models import RunOutput, SkillTrigger, TriggerSource
+from adarubric.core.turns import ReplyCounter
 
 _PROTOCOL_VERSION = 1
 #: A path inside an agent's skill-discovery dir, capturing the skill's own folder name. The escaped
@@ -52,6 +53,24 @@ _SKILL_PATH_RE = re.compile(
 _SKILL_MD_RE = re.compile(r"SKILL\.md", re.IGNORECASE)
 #: Claude's dedicated skill tool announces itself in the tool-call content.
 _LAUNCHING_RE = re.compile(r"Launching skill:\s*([^\"\\\n]+)")
+
+
+def _vendor_tool_name(update: dict) -> str | None:
+    """The agent's own tool name from ``_meta``, when it puts one there.
+
+    ACP's ``title`` is a human label ("Read File"); vendors often carry the real name alongside it —
+    claude-code-acp uses ``_meta.claudeCode.toolName`` (``Bash``, ``Skill``, ``mcp__acp__Read``).
+    Observed in a real transcript, so worth preferring; unknown shapes fall back to the title.
+    """
+    meta = update.get("_meta")
+    if not isinstance(meta, dict):
+        return None
+    for value in meta.values():
+        if isinstance(value, dict):
+            name = value.get("toolName") or value.get("tool_name")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+    return None
 
 
 def _session_model(session: dict) -> str | None:
@@ -231,10 +250,9 @@ class AcpConnection:
         #: left no record of what the agent actually said — so when tokens, cost or a skill came back
         #: missing there was nothing to inspect to find out where they live (or whether they exist).
         self._wire: list[str] = []
-        #: Model replies. ACP has no turn counter, so a reply is a run of agent output; a tool call
-        #: closes it, and the next output begins the next reply.
-        self._turns = 0
-        self._in_reply = False
+        #: Model replies, via the shared rule (core/turns.py): new output while nothing is
+        #: outstanding. Verified by hand against a real 269 KB claude transcript → 9.
+        self._replies = ReplyCounter()
         #: True while the last entry of ``_text`` is still being appended to by incoming chunks.
         self._block_open = False
         #: Any tool call at all. Distinguishes "the agent reported its actions and none was a skill"
@@ -400,10 +418,7 @@ class AcpConnection:
         update = (msg.get("params") or {}).get("update") or {}
         kind = update.get("sessionUpdate")
         if kind in ("agent_message_chunk", "agent_thought_chunk"):
-            # A run of chunks is ONE reply, however many chunks it arrives in.
-            if not self._in_reply:
-                self._turns += 1
-                self._in_reply = True
+            self._replies.output()
             content = update.get("content") or {}
             if kind == "agent_message_chunk" and content.get("type") == "text" and content.get("text"):
                 # Chunks are fragments of one message and are CONCATENATED — a stream can split
@@ -414,9 +429,16 @@ class AcpConnection:
                 else:
                     self._text.append(content["text"])
                 self._block_open = True
-        elif kind in ("tool_call", "tool_call_update"):
-            # Using a tool ends the reply: whatever the agent says next came from a fresh model call.
-            self._in_reply = False
+        elif kind == "tool_call":
+            # A tool the model asked for. Announced TWICE per call by claude-code-acp, which is why
+            # the counter tracks ids in a set rather than counting notifications.
+            self._replies.started(str(update.get("toolCallId") or ""))
+            self._block_open = False
+            self._record_tool_call(update)
+        elif kind == "tool_call_update":
+            # "completed" or "failed" — either way the model is invoked again afterwards.
+            if str(update.get("status") or "") in ("completed", "failed"):
+                self._replies.finished(str(update.get("toolCallId") or ""))
             self._block_open = False
             self._record_tool_call(update)
         elif kind == "usage_update":
@@ -457,9 +479,13 @@ class AcpConnection:
         # (`toolu_01D5em…: 4`) and inflated the total 4x, because ACP sends one `tool_call` plus
         # several `tool_call_update`s as a single call progresses. The first notification carries the
         # title; later updates may omit it, so remember it per id.
-        if call_id and title:
-            self._call_titles.setdefault(call_id, title)
-        name = title or self._call_titles.get(call_id) or update.get("kind") or "tool"
+        # Prefer the agent's REAL tool name when it exposes one. claude-code-acp puts it in
+        # `_meta.claudeCode.toolName` (Bash / Skill / mcp__acp__Read) while `title` is a generic
+        # human label like "Read File" — the real names are far more useful for comparison.
+        real = _vendor_tool_name(update) or title
+        if call_id and real:
+            self._call_titles.setdefault(call_id, real)
+        name = real or self._call_titles.get(call_id) or update.get("kind") or "tool"
         if call_id:
             if call_id not in self._counted_calls:
                 self._counted_calls.add(call_id)
@@ -529,7 +555,8 @@ class AcpConnection:
             # back missing this is the only way to see whether the agent ever sent it.
             raw_output=self.wire_log(),
             model=model,
-            num_turns=self._turns or None,
+            num_turns=self._replies.value,
+            num_turns_reported=_reported_turns(result),
             input_tokens=in_tok,
             output_tokens=out_tok,
             total_tokens=total_tok,
@@ -583,6 +610,17 @@ def _as_int(value: object) -> int | None:
     return n if n > 0 else None
 
 
+def _reported_turns(result: dict) -> int | None:
+    """A turn count only if the AGENT states one. Never inferred — see the note at the call site."""
+    for block in (result.get("usage"), result.get("tokenUsage"), result):
+        if isinstance(block, dict):
+            for key in ("turns", "num_turns", "numTurns", "turn_count", "turnCount"):
+                n = _as_int(block.get(key))
+                if n:
+                    return n
+    return None
+
+
 def _usage_tokens(result: dict) -> tuple[int | None, int | None, int | None, int | None]:
     """Token counts from a ``session/prompt`` reply: ``(input, output, total, cached_read)``.
 
@@ -618,3 +656,73 @@ def _usage_tokens(result: dict) -> tuple[int | None, int | None, int | None, int
             if total:
                 return None, None, total, None
     return None, None, None, None
+
+
+def replay_wire_log(transcript: str) -> RunOutput:
+    """Re-derive a run's metrics from a saved protocol transcript (``raw.log``).
+
+    The transcript is the whole conversation, so every metric that came from it can be recomputed
+    later — which is the point of recording it. Used by ``adarubric recompute`` to bring older runs up
+    to date when the parsing improves, without re-running (and re-paying for) the agent.
+
+    Only lines the AGENT sent (``<-``) are replayed; our own (``->``) carry no metrics.
+    """
+    conn = AcpConnection.__new__(AcpConnection)  # no subprocess: we're reading, not talking
+    conn.cwd = ""
+    conn._files = _HostFiles("")
+    conn._id = 0
+    conn._text = []
+    conn._tools = {}
+    conn._call_titles = {}
+    conn._counted_calls = set()
+    conn._skills = []
+    conn._seen = set()
+    conn._stderr = []
+    conn._wire = []
+    conn._replies = ReplyCounter()
+    conn._block_open = False
+    conn._saw_tool_call = False
+    conn._cost_usd = None
+    conn._cost_note = None
+    conn._parse_errors = []
+    conn._context_used = None
+    conn._context_size = None
+
+    model, result = None, {}
+    for line in (transcript or "").splitlines():
+        if not line.startswith("<-"):
+            continue
+        try:
+            msg = json.loads(line[3:])
+        except json.JSONDecodeError:
+            continue
+        if "method" in msg:
+            conn._handle_notification(msg)
+            continue
+        payload = msg.get("result")
+        if not isinstance(payload, dict):
+            continue
+        if model is None:
+            model = _session_model(payload)          # the session/new reply
+        if "stopReason" in payload:
+            result = payload                          # the session/prompt reply
+
+    in_tok, out_tok, total_tok, cached = _usage_tokens(result)
+    return RunOutput(
+        output="\n".join(conn._text).strip(),
+        raw_output=transcript,
+        model=model,
+        num_turns=conn._replies.value,
+        num_turns_reported=_reported_turns(result),
+        input_tokens=in_tok,
+        output_tokens=out_tok,
+        total_tokens=total_tok,
+        cached_input_tokens=cached,
+        cost_usd=conn._cost_usd,
+        tools_used=sorted(conn._tools),
+        tool_counts=dict(conn._tools),
+        skills_triggered=conn._skills,
+        skill_opened=(True if conn._skills else (False if conn._saw_tool_call else None)),
+        skill_files_read=[s.details for s in conn._skills
+                          if s.source == TriggerSource.FILE_READ and s.details],
+    )

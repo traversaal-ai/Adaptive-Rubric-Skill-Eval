@@ -370,6 +370,166 @@ def check(
     raise typer.Exit(code=1)
 
 
+@app.command()
+def recompute(
+    output: str = typer.Option("output", "--output", help="Output root to update."),
+    apply: bool = typer.Option(
+        False, "--apply", help="Actually write the changes. Without this it's a preview."
+    ),
+) -> None:
+    """Re-derive metrics for past runs from the logs they already saved.
+
+    Every run keeps its agent's full output in ``raw.log``, so anything computed *from* that output
+    can be recomputed later. When the parsing improves — a turn count that was measuring the wrong
+    thing, tool names that were really call ids, a price table that gained an entry — old runs can be
+    brought up to date without re-running (and re-paying for) the agent.
+
+    Only re-derived facts are touched. The reward, the timings, whether it succeeded, the file
+    changes: none of that comes from ``raw.log``, so none of it is rewritten. Updates happen in place
+    — no backup copies, because ``raw.log`` is the evidence and this can always be run again.
+
+    Previews by default; pass ``--apply`` to write.
+    """
+    import json
+    from pathlib import Path
+
+    import yaml
+
+    from adarubric.core.pricing import estimate_cost, is_specific_model
+    from adarubric.core.skill_depth import classify as classify_skill_depth
+    from adarubric.harnesses.acp import replay_wire_log
+    from adarubric.harnesses.claude import parse_stream_json
+    from adarubric.harnesses.codex import parse_codex_jsonl
+    from adarubric.harnesses.gemini import parse_gemini_output
+
+    def reparse(harness: str, raw: str):
+        """Run the current parser for whichever agent produced this log."""
+        if harness.startswith("acp"):
+            return replay_wire_log(raw)
+        if harness == "claude-code":
+            return parse_stream_json(raw, "", 0)
+        if harness == "codex":
+            return parse_codex_jsonl(raw)
+        if harness == "gemini-cli":
+            return parse_gemini_output(raw)
+        return None
+
+    def skill_paths_for(trial_dir: Path, meta: dict) -> list[str]:
+        """Where this task's skills live on disk — needed to judge depth fairly.
+
+        A skill that is only a SKILL.md has no depth to reach, so knowing what the skill *contains*
+        is what stops a single-file skill being marked shallow.
+        """
+        ev = trial_dir.parent / "eval.yaml"
+        if not ev.is_file():
+            return []
+        try:
+            manifest = yaml.safe_load(ev.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            return []
+        dockerfile = ((manifest.get("environment") or {}).get("dockerfile")) or ""
+        if not dockerfile:
+            return []
+        skills_root = Path(dockerfile).parent / "skills"
+        return [str(skills_root / n) for n in (manifest.get("skills") or [])]
+
+    root = Path(output)
+    rows: list[tuple[str, str, str, str]] = []
+    changed = 0
+
+    for run_json in sorted(root.rglob("run.json")):
+        trial_dir = run_json.parent
+        raw_log = trial_dir / "raw.log"
+        if not raw_log.is_file():
+            continue
+        try:
+            meta = json.loads(run_json.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+        raw = raw_log.read_text(encoding="utf-8", errors="replace")
+        if not raw.strip():
+            continue
+        out = reparse(meta.get("harness", ""), raw)
+        if out is None:
+            continue
+
+        usage = meta.setdefault("usage", {})
+        skill = meta.setdefault("skill_usage", {})
+        before = (usage.get("num_turns"), usage.get("cost_usd") or usage.get("estimated_cost_usd"),
+                  skill.get("skill_depth"), tuple(sorted((usage.get("tool_counts") or {}))))
+
+        # "New wins unless the new value is None" — a parser that can't see something must never
+        # erase what an earlier one did see.
+        def put(target: dict, key: str, value) -> None:
+            if value is not None:
+                target[key] = value
+
+        put(meta, "model", out.model)
+        put(usage, "num_turns", out.num_turns)
+        put(usage, "num_turns_reported", out.num_turns_reported)
+        put(usage, "input_tokens", out.input_tokens)
+        put(usage, "output_tokens", out.output_tokens)
+        put(usage, "cached_input_tokens", out.cached_input_tokens)
+        total = out.total_tokens
+        if total is None and out.input_tokens is not None and out.output_tokens is not None:
+            total = out.input_tokens + out.output_tokens
+        put(usage, "total_tokens", total)
+        if out.tool_counts:
+            usage["tool_counts"] = dict(out.tool_counts)
+            usage["tools_used"] = sorted(out.tool_counts)
+            usage["num_tool_calls"] = sum(out.tool_counts.values())
+        put(usage, "cost_usd", out.cost_usd)
+
+        # Re-price with today's table, and against the pin when the agent named no usable model.
+        reported = out.model if is_specific_model(out.model) else None
+        priced = reported or meta.get("model_requested")
+        est = estimate_cost(priced, usage.get("input_tokens"), usage.get("output_tokens"))
+        usage["estimated_cost_usd"] = est
+        usage["cost_source"] = ("reported" if usage.get("cost_usd") is not None
+                                else ("estimated" if est is not None else None))
+
+        if out.skill_opened is not None:
+            skill["skill_opened"] = out.skill_opened
+        if out.skills_triggered:
+            skill["skills_triggered"] = [
+                {"name": s.name, "source": getattr(s.source, "value", str(s.source)),
+                 "timestamp": s.timestamp, "details": s.details}
+                for s in out.skills_triggered
+            ]
+            skill["skill_files_read"] = list(out.skill_files_read)
+            skill["num_skill_files_read"] = len(out.skill_files_read)
+        depth = classify_skill_depth(skill.get("skill_opened"), out.skills_triggered,
+                                     skill_paths_for(trial_dir, meta))
+        put(skill, "skill_depth", depth)
+
+        after = (usage.get("num_turns"), usage.get("cost_usd") or usage.get("estimated_cost_usd"),
+                 skill.get("skill_depth"), tuple(sorted((usage.get("tool_counts") or {}))))
+        if before == after:
+            continue
+        changed += 1
+        key = str(trial_dir.relative_to(root)).replace("\\", "/")
+        rows.append((key,
+                     f"{before[0]} -> {after[0]}",
+                     f"{_fmt_cost(before[1])} -> {_fmt_cost(after[1])}",
+                     f"{before[2]} -> {after[2]}"))
+        if apply:
+            # Updated in place, with no backup: `run.json` is DERIVED data and `raw.log` is the
+            # evidence it came from, so this can always be run again. A copy would only be clutter.
+            run_json.write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
+
+    if not rows:
+        typer.echo("Nothing to update — every run already matches the current parsing.")
+        return
+    typer.echo(f"{'run':<52} {'turns':<16} {'cost':<22} skill")
+    for key, turns, cost, depth in rows:
+        typer.echo(f"{key:<52} {turns:<16} {cost:<22} {depth}")
+    typer.echo("")
+    if apply:
+        typer.secho(f"Updated {changed} run(s) in place.", fg="green")
+    else:
+        typer.secho(f"{changed} run(s) would change. Re-run with --apply to write.", fg="yellow")
+
+
 #: Command words that wrap the real agent rather than being it — skipped when labelling an ACP run.
 _ACP_WRAPPERS = {"npx", "node", "npm", "bunx", "bun", "deno", "uv", "uvx", "run", "python", "python3",
                  "sh", "bash", "-y", "--yes", "exec", "pipx"}

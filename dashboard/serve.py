@@ -90,6 +90,24 @@ def _live(s: dict) -> dict:
     }
 
 
+def _derived_depth(skill: dict) -> str | None:
+    """Best-effort depth for a run recorded before ``skill_depth`` existed.
+
+    Uses only what that run already stored, so nothing is invented: a read of a file inside a skill
+    folder other than SKILL.md means it went deeper; otherwise it was merely opened.
+    """
+    opened = skill.get("skill_opened")
+    if opened is False:
+        return "not_opened"
+    if opened is not True:
+        return None
+    for entry in skill.get("skill_files_read") or []:
+        text = str(entry).lower()
+        if "skills" in text and "skill.md" not in text.rsplit("/", 1)[-1]:
+            return "used"
+    return "noticed"
+
+
 def _under_attempt(run_json: Path) -> bool:
     p = run_json.parent
     return p.name.startswith("attempt-") or p.parent.name.startswith("attempt-")
@@ -133,11 +151,12 @@ def _run_record(run_json: Path, meta: dict) -> dict:
         "export_error": meta.get("export_error"),
         "skill_opened": skill.get("skill_opened"),
         # "used" (read past the front page) | "noticed" (front page only) | "not_opened" | None.
-        # Reading SKILL.md's headings and then ignoring them is not skill use, and skill_opened alone
-        # cannot tell the two apart.
-        "skill_depth": skill.get("skill_depth"),
+        # Derived here when the run predates the field, so the table never mixes two vocabularies —
+        # showing "opened" on old rows next to "noticed" on new ones just looks like two scales.
+        "skill_depth": skill.get("skill_depth") or _derived_depth(skill),
         "skill_files": skill.get("skill_files_read") or [],
-        "turns": usage.get("num_turns"),
+        "turns": usage.get("num_turns"),                     # ours: model replies, one definition
+        "turns_reported": usage.get("num_turns_reported"),   # what the agent itself claimed
         "tool_calls": usage.get("num_tool_calls"),
         "commands": usage.get("num_commands"),
         "tools": usage.get("tool_counts") or {},
@@ -173,7 +192,7 @@ def _running_record(output_root: str, t: dict) -> dict:
         "success": False, "timed_out": False, "graded": False, "reward": None,
         "grading_error": None, "export_error": None, "skill_opened": None,
         "skill_depth": None, "skill_files": [],
-        "turns": None, "tool_calls": None, "commands": None, "tools": {},
+        "turns": None, "turns_reported": None, "tool_calls": None, "commands": None, "tools": {},
         "tokens": {"input": None, "output": None, "total": None}, "cost_usd": None, "cost_source": None,
         "time_s": None,
         # A live job has a real start time (from status.json) but no end time yet — the page turns

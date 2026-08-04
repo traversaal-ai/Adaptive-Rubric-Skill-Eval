@@ -43,7 +43,7 @@ GEMINI_API_KEY=...                # gemini-cli
 
 Only the key belonging to the harness you run is injected into the container.
 
-**Not in the repo** (you fetch or create these): `dataset/` (clone SkillsBench, see §3), `.env`,
+**Not in the repo** (you fetch or create these): `dataset/` (clone SkillsBench, see §2), `.env`,
 `output/` (made on first run). The Docker integration test is skipped unless you set
 `ADARUBRIC_DOCKER_TESTS=1`.
 
@@ -75,59 +75,104 @@ you, and any time every agent mysteriously scores zero.
 > **Your own skill?** You give AdaRubric a folder; it writes the record of what ran into
 > `eval.yaml`. **You never write `eval.yaml`** — it's the receipt, not the recipe.
 
-### 1. A skill folder (simplest)
+### 1. Your own task
 
-Put `SKILL.md` in a folder. Optionally add `TASK.md` (the instruction) and `grader.yaml` (the checks):
+A task is always the same three things: **an instruction** (what to do), **a skill** (the help), and
+**a grader** (how to score it). You write one file — `adarubric.yaml` — and lay the folder out one of
+two ways. The only question that picks between them: *does the agent start with files, or an empty
+folder?*
+
+**Layout A — no starting files.** The whole folder is the skill; `SKILL.md` sits at the top:
 
 ```
-my-skill/
-  SKILL.md         # the skill being tested (required)
-  TASK.md          # the instruction (optional; or use --instruction)
-  grader.yaml      # the checks (optional; leave out for an unscored run)
+polite-emails/
+  adarubric.yaml   # instruction + grader
+  SKILL.md         # the skill
+  examples.md      # more skill pages, if any
 ```
+
+**Layout B — the task ships files** (broken code to fix, a CSV to clean). Now the skill needs its
+own box, or those files would be copied to the agent *inside the skill*:
+
+```
+fix-logging/
+  adarubric.yaml           # instruction + file list + grader
+  fixtures/orders.py       # what the agent must fix
+  skills/
+    house-logging/         # the box IS the skill; its name is the skill's name
+      SKILL.md
+      references/naming.md
+```
+
+(`fixtures/` and `references/` are just names — call them anything. `skills/`, `SKILL.md`, and
+`adarubric.yaml` are fixed names.)
+
+> ⚠️ **Pick one — don't mix.** A root `SKILL.md` means the **whole folder is the skill**, and all of
+> it is copied to the agent (only `adarubric.yaml` / `TASK.md` / `grader.yaml` are removed). Put a
+> `fixtures/` or a `check.py` next to a root `SKILL.md` and the agent receives them *inside the
+> skill* — worst case, the very script your grader runs. The moment the folder holds anything that
+> isn't the skill, switch to Layout B.
+
+The same `adarubric.yaml` works for both — Layout A simply has no `workspace:` list:
 
 ```yaml
-# grader.yaml — reward is the weighted pass fraction of these
-graders:
-  - run: pytest -q                 # exit 0, or print "REWARD SCORE: x"
-    weight: 1.0
-  - run: test -f report.txt
-    weight: 0.5
-```
-
-```bash
-uv run adarubric run ./my-skill --harness claude-code --dataset generic --env-file .env
-```
-
-`TASK.md` and `grader.yaml` are **stripped out before the skill is copied to the agent**, so it can
-never read its own marking scheme.
-
-### 2. One config file (`adarubric.yaml`)
-
-When you need a Docker recipe, input files, or several tasks in one place:
-
-```yaml
-name: my-task
 instruction: |
-  Solve the task described in the workspace.
-workspace:
-  - fixtures/input.json           # copied in (src, or src:dest)
-docker:
-  base: python:3.12-slim
-  setup:
-    - pip install pandas
-timeout: 600
+  orders.py is full of leftover print statements. Clean it up.
+workspace:                          # Layout B only: files to place in front of the agent
+  - fixtures/orders.py:orders.py    # left = here, right = where the agent sees it
+timeout: 300
 graders:
   - type: deterministic
-    run: pytest -q && echo "REWARD SCORE: 1.0"
-    weight: 1.0
+    run: python check.py            # prints {"score": 0..1}, or "REWARD SCORE: x",
+    weight: 1.0                     # or just exits 0 (pass) / 1 (fail)
 ```
 
 ```bash
-uv run adarubric run ./my-task --harness claude-code --dataset generic --sandbox docker --env-file .env
+uv run adarubric run ./fix-logging --harness claude-code --env-file .env
 ```
 
-### 3. A SkillsBench task (needs Docker)
+**What the agent actually receives** (both layouts end the same way):
+
+```
+its workspace/
+  orders.py                          ← from workspace:, the job on the desk
+  .claude/skills/house-logging/      ← the skill, in the agent's skills drawer
+```
+
+Two copies, two doors: `workspace:` files land on the desk, the skill lands in the drawer of
+whichever agent is running (`.claude/skills/` for claude-code, `.agents/skills/` for codex, …).
+`adarubric.yaml` itself is **never copied in** — the agent can't read its own marking scheme.
+
+Worked, runnable versions of both are in this repo:
+
+| | layout | run it |
+|---|---|---|
+| [`examples/release-notes/`](examples/release-notes/) | A — empty desk, writing task | `uv run adarubric run examples/release-notes --harness claude-code --env-file .env` |
+| [`examples/fix-logging/`](examples/fix-logging/) | B — ships broken code | `uv run adarubric run examples/fix-logging --harness claude-code --env-file .env` |
+
+Each example's README says what score to expect from an agent that follows the skill, one that
+skims it, and one that never sees it — so you know what a number means before spending anything.
+
+<details>
+<summary>Shortcuts and extras (optional)</summary>
+
+- **`TASK.md` + `grader.yaml`** — instead of `adarubric.yaml` you can put the instruction in a
+  `TASK.md` and the checks in a `grader.yaml` (that's what `examples/release-notes/` does). Same
+  meaning, no `workspace:` support. If `adarubric.yaml` exists, it wins and these are ignored.
+- **No grader at all** — leave `graders:` out and the run still works: you get turns, tool calls,
+  cost, and whether the skill was opened. Just no score.
+- **`--instruction "..."`** on the command line overrides the file.
+- **Skill somewhere unusual?** Point the run path straight at its `SKILL.md`, or add
+  `skill: path/to/skill` in `adarubric.yaml`.
+- **More than one skill** — put several boxes under `skills/`; all are injected. That's how you
+  test whether the agent picks the right one.
+- **Docker** — add `docker: {base: ..., setup: ...}` and run with `--sandbox docker`.
+- Like the stripped `adarubric.yaml`, `TASK.md` / `grader.yaml` / `eval.yaml` are also removed from
+  the skill before it's copied to the agent.
+
+</details>
+
+### 2. A SkillsBench task (needs Docker)
 
 **Get the dataset first.** It's a separate, large repo, not included here:
 
@@ -154,7 +199,7 @@ uv run adarubric run dataset/skillsbench/tasks/invoice-fraud-detection \
 These tasks hardcode `/app`, `/verifier`, `/logs`, so Docker isn't optional — the task's own
 `environment/Dockerfile` is built and its `verifier/` does the scoring.
 
-### 4. Several harnesses, models, repeats
+### 3. Several harnesses, models, repeats
 
 ```bash
 # same task on three agents — each gets its own output folder
@@ -169,7 +214,7 @@ uv run adarubric run <task> \
 uv run adarubric run <task> --harness claude-code,codex --model claude-opus-4-8 --trials 3 --env-file .env
 ```
 
-### 5. Does the skill actually help? Run it without one
+### 4. Does the skill actually help? Run it without one
 
 ```bash
 uv run adarubric run <task> --harness codex --inject-skills no --sandbox docker --env-file .env

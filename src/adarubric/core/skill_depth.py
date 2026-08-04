@@ -31,6 +31,7 @@ advice — that needs judging the work itself, which is a separate step.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from adarubric.core.models import SkillTrigger
 
@@ -63,19 +64,53 @@ def _is_deep(evidence: str) -> bool:
     return False
 
 
-def classify(skill_opened: bool | None, triggers: list[SkillTrigger]) -> str | None:
-    """Grade how deeply the skills were used, from whatever trajectory evidence the harness gave.
+def has_deeper_files(skill_paths: "list[str] | tuple[str, ...] | None") -> bool | None:
+    """Do any of these skills contain something beyond their front page?
+
+    Essential context for judging depth. A skill that is *only* a ``SKILL.md`` has no depth to reach,
+    so reading it IS complete use — calling that "noticed" would invent a shortcoming. Real example:
+    of one task's three skills, ``pdf`` ships a reference plus eight scripts, ``xlsx`` a helper
+    script, and ``fuzzy-match`` nothing but ``SKILL.md``.
+
+    ``None`` when we can't tell (no paths given, or they aren't on disk any more).
+    """
+    if not skill_paths:
+        return None
+    checked = False
+    for path in skill_paths:
+        root = Path(path)
+        if not root.is_dir():
+            continue
+        checked = True
+        for child in root.rglob("*"):
+            if child.is_file() and child.name.lower() != _FRONT_PAGE:
+                return True
+    return False if checked else None
+
+
+def classify(
+    skill_opened: bool | None,
+    triggers: list[SkillTrigger],
+    skill_paths: "list[str] | tuple[str, ...] | None" = None,
+) -> str | None:
+    """Grade how deeply the skills were used, from the trajectory evidence plus what the skills hold.
 
     ``skill_opened`` carries the harness's own verdict, including the meaningful difference between a
-    definitive ``False`` and an unknowable ``None``; ``triggers`` carry the file/tool evidence.
+    definitive ``False`` and an unknowable ``None``. ``triggers`` carry the file/tool evidence.
+    ``skill_paths`` lets us avoid marking a single-file skill as shallow.
     """
+    deeper = has_deeper_files(skill_paths)
+
     if triggers:
         haystack = " ".join(f"{t.name} {t.details or ''}" for t in triggers)
-        return USED if _is_deep(haystack) else NOTICED
+        if _is_deep(haystack):
+            return USED
+        # Opened, with nothing deeper in the skill to reach → that IS full use, not skimming.
+        return NOTICED if deeper is not False else USED
     if skill_opened is True:
-        # The harness is sure a skill was opened but gave no paths (gemini's tool tallies): we know it
-        # was noticed and cannot know more. Claiming USED here would be a guess.
-        return NOTICED
+        # Opened, but the harness gave no paths (gemini reports tool tallies only). Still don't guess:
+        # unless the skills have no depth at all, in which case there is nothing to have missed.
+        return NOTICED if deeper is not False else USED
     if skill_opened is False:
         return NOT_OPENED
     return None
