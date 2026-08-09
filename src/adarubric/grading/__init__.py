@@ -1,4 +1,4 @@
-"""Grading adapters — deterministic (Step 2) and llm_rubric (Step 3), plus a registry.
+"""Grading adapters — deterministic and llm_rubric, plus a registry.
 
 The ``Grader`` contract lives in ``core/contracts.py``. Graders run AFTER the agent finishes,
 against the final workspace — never visible to the agent.
@@ -9,12 +9,15 @@ from __future__ import annotations
 from typing import Callable
 
 from adarubric.core.contracts import Grader
+from adarubric.grading.adaptive_rubric import AdaptiveRubricGrader
 from adarubric.grading.deterministic import DeterministicGrader, SkillsBenchVerifier
+from adarubric.grading.static_rubric import LlmRubricGrader
 
 _REGISTRY: dict[str, Callable[[], Grader]] = {
     "deterministic": DeterministicGrader,
     "skillbench_verifier": SkillsBenchVerifier,
-    # "llm_rubric" arrives in Step 3.
+    "llm_rubric": LlmRubricGrader,
+    "adaptive_rubric": AdaptiveRubricGrader,
 }
 
 

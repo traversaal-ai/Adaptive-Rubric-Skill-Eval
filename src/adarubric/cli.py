@@ -39,12 +39,13 @@ def run(
         ..., help="Path to a skill folder or a SkillsBench task package."
     ),
     harness: str = typer.Option(
-        ...,
+        None,
         "--harness",
         help="Harness(es) to test, comma-separated: claude-code | gemini-cli | codex. "
-        "Explicit - no auto-detection. Multiple runs the same task on each. Pin a model per "
+        "Multiple runs the same task on each. Pin a model per "
         "harness with 'name:model', e.g. 'claude-code:claude-opus-4-8,codex:gpt-5-codex' "
-        "(falls back to --model, else the CLI's own default).",
+        "(falls back to --model, else the CLI's own default). Optional when the task's "
+        "adarubric.yaml sets defaults.agent — this flag overrides it.",
     ),
     sandbox: str = typer.Option(
         "local", "--sandbox", help="Where to run: local | docker."
@@ -76,7 +77,9 @@ def run(
         help="Output root. Results land in <output>/<harness>/<task>/attempt-N/.",
     ),
     trials: int = typer.Option(
-        1, "--trials", help="Repetitions inside this attempt (agents are non-deterministic)."
+        None, "--trials",
+        help="Repetitions inside this attempt (agents are non-deterministic). "
+        "Default: the task's defaults.trials, else 1. This flag overrides both.",
     ),
     timeout: int = typer.Option(
         None, "--timeout",
@@ -84,7 +87,31 @@ def run(
     ),
     grade: bool = typer.Option(
         True, "--grade/--no-grade",
-        help="Run deterministic graders after the agent (skillbench verifier / config graders).",
+        help="Run graders after the agent (skillbench verifier / config graders / llm rubric).",
+    ),
+    llm_rubric: str = typer.Option(
+        "yes", "--llm-rubric",
+        help="Also have an LLM judge score the run against a rubric: yes (default) | no. Uses the "
+        "task's own llm_rubric grader when it defines one, else a built-in general rubric at weight "
+        "0.3. Needs a judge API key (GEMINI_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY, gemini "
+        "picked first) — with no key the default judge is skipped quietly. Costs a small LLM call "
+        "per trial. Accepts yes/no, true/false, 1/0, on/off.",
+    ),
+    adaptive_rubric: str = typer.Option(
+        "yes", "--adaptive-rubric",
+        help="Also score with the ADAPTIVE rubric: yes (default) | no. Four task-specific tests "
+        "generated from the instruction + SKILL.md (cached in <output>/rubrics/), judged blind, "
+        "one small LLM call per test. Recorded and shown next to the other scores but weight 0 in "
+        "the reward. Same key rule as --llm-rubric. Accepts yes/no, true/false, 1/0, on/off.",
+    ),
+    adaptive_provider: str = typer.Option(
+        None, "--adaptive-provider",
+        help="Judge/generator for the adaptive rubric: gemini | anthropic | openai. "
+        "Default: first key found (gemini first).",
+    ),
+    adaptive_model: str = typer.Option(
+        None, "--adaptive-model",
+        help="Model for the adaptive rubric's generator and judge (default: the provider's default).",
     ),
     inject_skills: str = typer.Option(
         "yes", "--inject-skills",
@@ -143,11 +170,27 @@ def run(
     from adarubric.sandboxes.registry import create_sandbox
 
     file_env = _load_env_file(env_file) if env_file else {}
+
+    spec = load_spec(path, instruction, task=task)
+
+    # Precedence, everywhere: command line > the task's defaults > built-in defaults.
+    harness = harness or spec.default_harness
+    if not harness:
+        typer.secho(
+            "No harness: pass --harness (claude-code | gemini-cli | codex | acp) or set "
+            "defaults.agent in the task's adarubric.yaml.", fg="red",
+        )
+        raise typer.Exit(code=1)
+    trials = trials if trials is not None else (spec.default_trials or 1)
+
     # Each entry is "name" or "name:model"; a per-harness model overrides the global --model.
     harness_specs = _parse_harness_specs(harness, model)
 
-    spec = load_spec(path, instruction, task=task)
     spec.inject_skills = _parse_bool_flag(inject_skills, "--inject-skills")
+    spec.run_llm_rubric = _parse_bool_flag(llm_rubric, "--llm-rubric")
+    spec.run_adaptive_rubric = _parse_bool_flag(adaptive_rubric, "--adaptive-rubric")
+    spec.adaptive_provider = adaptive_provider
+    spec.adaptive_model = adaptive_model
     if not spec.inject_skills:
         withheld = ", ".join(os.path.basename(p) for p in spec.skill_paths) or "none"
         typer.secho(
@@ -186,6 +229,35 @@ def run(
         spec.timeout_sec = timeout
     graders = "skillbench-verifier" if spec.mode == "skillbench" else f"{len(spec.graders)} grader(s)"
     typer.echo(f"mode={spec.mode}  sandbox={sandbox}  task={spec.name}  grade={grade} ({graders})")
+
+    # Judge keys (for the LLM rubric) come from --env-file / the environment. They are handed to the
+    # judge only — never injected into the sandbox, so the agent and check scripts can't read them.
+    from adarubric.grading.static_rubric import pick_provider
+    judge_keys = ("GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+    judge_env = {k: v for k in judge_keys if (v := file_env.get(k) or os.environ.get(k))}
+    if spec.run_llm_rubric:
+        judge = pick_provider(None, judge_env)
+        rubric_src = ("the task's own" if any(g.type == "llm_rubric" for g in spec.graders)
+                      else f"generated per task (cached in {output}/rubrics/, fallback: built-in)")
+        if judge:
+            typer.echo(f"llm rubric: on  judge={judge}  rubric={rubric_src}")
+        else:
+            typer.secho(
+                "llm rubric: skipped - no judge API key found (GEMINI_API_KEY / ANTHROPIC_API_KEY / "
+                "OPENAI_API_KEY). Deterministic grading still runs.", fg="yellow",
+            )
+    else:
+        typer.echo("llm rubric: off (--llm-rubric no)")
+    if spec.run_adaptive_rubric:
+        a_judge = pick_provider(adaptive_provider, judge_env)
+        if a_judge:
+            typer.echo(
+                f"adaptive rubric: on  judge={a_judge}  4 task-specific tests, blind, weight 0 "
+                f"(shown, not blended)")
+        else:
+            typer.secho("adaptive rubric: skipped - no judge API key.", fg="yellow")
+    else:
+        typer.echo("adaptive rubric: off (--adaptive-rubric no)")
 
     # Live status: written to <output>/status.json as the run happens (stages + activity feed), so a
     # watching dashboard can render it live. Console + status file share one fan-out reporter.
@@ -247,7 +319,8 @@ def run(
             # Hand the harness the sandbox's interactive launcher: a local process, or `docker exec -i`
             # into the container. Same ACP conversation either way — this is what unlocks docker.
             h.spawn = sb.popen
-        runner = EvalRunner(sb, output_root=output, reporter=reporter, grade=grade)
+        runner = EvalRunner(sb, output_root=output, reporter=reporter, grade=grade,
+                            judge_env=judge_env)
         # Inject ONLY this harness's declared key(s) from the file into the sandbox.
         harness_env = {k: file_env[k] for k in h.env_keys if k in file_env}
         if hname == "acp":
@@ -368,6 +441,90 @@ def check(
         fg="red",
     )
     raise typer.Exit(code=1)
+
+
+@app.command()
+def init(
+    path: str = typer.Argument(".", help="Folder holding your SKILL.md (or skills/…)."),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing adarubric.yaml."),
+) -> None:
+    """Read your SKILL.md and write the task config (adarubric.yaml) for you.
+
+    With an API key (GEMINI_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY — gemini picked first,
+    from <path>/.env or your shell) an LLM writes the whole config: instruction, workspace files,
+    a deterministic grader, and the llm rubric. Without a key you get a commented template.
+    Either way: review and edit the file before running — it's a draft, not a verdict.
+    """
+    import os
+    from pathlib import Path
+
+    from adarubric.loading import load_spec
+    from adarubric.scaffold import (
+        detect_skills_with_content,
+        extract_instruction_hint,
+        generate_with_llm,
+        pick_init_llm,
+        render_template,
+    )
+
+    d = Path(path).expanduser().resolve()
+    if not d.is_dir():
+        typer.secho(f"Not a folder: {d}", fg="red")
+        raise typer.Exit(code=1)
+    out_path = d / "adarubric.yaml"
+    if out_path.exists() and not force:
+        typer.secho("adarubric.yaml already exists. Use --force to overwrite.", fg="red")
+        raise typer.Exit(code=1)
+
+    typer.echo("\nadarubric init\n")
+    skills = detect_skills_with_content(d)
+    if not skills:
+        typer.echo("  No SKILL.md found. Creating a generic template.")
+        typer.echo("     Place a SKILL.md in this folder for better scaffolding.\n")
+        out_path.write_text(
+            render_template("my-skill", "Describe what the agent should do with this skill."),
+            encoding="utf-8")
+        typer.echo(f"  Created {out_path.name}. Edit it, then run: adarubric run {path}")
+        return
+
+    typer.echo(f"  Found {len(skills)} skill(s): {', '.join(n for n, _ in skills)}\n")
+
+    # <dir>/.env fills in keys the shell doesn't already have — skillgrade's exact precedence.
+    env = dict(os.environ)
+    env_file = d / ".env"
+    if env_file.is_file():
+        for k, v in _load_env_file(str(env_file)).items():
+            env.setdefault(k, v)
+
+    provider = pick_init_llm(env)
+    if provider:
+        typer.echo(f"  generating the config with {provider} (it writes the llm rubric too)…")
+        try:
+            content = generate_with_llm(skills, provider, env)
+            out_path.write_text(content, encoding="utf-8")
+            typer.secho(f"  created {out_path.name}", fg="green")
+            # Safety net skillgrade doesn't have: prove the generated file actually loads.
+            try:
+                load_spec(str(out_path))
+            except Exception as exc:  # noqa: BLE001
+                typer.secho(
+                    f"  warning: the generated file doesn't load cleanly ({exc}). "
+                    "Fix it by hand before running.", fg="yellow")
+            typer.echo(f"     Review and edit the file, then run: adarubric run {path}\n")
+            return
+        except Exception as exc:  # noqa: BLE001
+            typer.secho(f"  AI generation failed: {exc}", fg="red")
+            typer.echo("     Falling back to template.\n")
+    else:
+        typer.echo(
+            "  Set GEMINI_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY for AI-powered "
+            "generation.\n")
+
+    name, md = skills[0]
+    out_path.write_text(
+        render_template(f"test-{name}", extract_instruction_hint(md)), encoding="utf-8")
+    typer.echo(f"  Created {out_path.name}. Edit it to define your eval tasks, then run: "
+               f"adarubric run {path}\n")
 
 
 @app.command()

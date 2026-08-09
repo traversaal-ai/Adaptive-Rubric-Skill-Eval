@@ -124,9 +124,17 @@ def _load_config(d: Path, cfg_path: Path, instruction: str | None, task: str | N
     if not instr:
         raise ValueError(f"No instruction found in {cfg_path.name} (and none passed via --instruction).")
 
-    # Workspace entries: "src" (dest = basename) or "src:dest" (explicit relative dest).
+    # Workspace entries, three accepted shapes: "src" (dest = basename), "src:dest", or the
+    # skillgrade dict form {src: ..., dest: ...} so old eval.yaml files drop in unchanged.
     workspace_map: dict[str, str] = {}
     for entry in (task_def.get("workspace") or raw.get("workspace") or []):
+        if isinstance(entry, dict):
+            src_s, dest = str(entry.get("src", "")), str(entry.get("dest", "") or "")
+            if not src_s:
+                continue
+            src_p = (d / src_s).resolve()
+            workspace_map[str(src_p)] = dest or src_p.name
+            continue
         entry = str(entry)
         src, sep, dest = entry.partition(":")
         # Guard against Windows drive letters ("C:\...") being read as src:dest.
@@ -152,7 +160,13 @@ def _load_config(d: Path, cfg_path: Path, instruction: str | None, task: str | N
         raise ValueError(f"No skill found for {cfg_path} - add a `skill:` path or a SKILL.md.")
 
     # Graders (compact all-in-one shape): tasks[].graders or top-level graders.
-    graders = _parse_graders(task_def.get("graders") or raw.get("graders") or [])
+    graders = _parse_graders(task_def.get("graders") or raw.get("graders") or [], base=d)
+
+    # defaults.grader_provider / defaults.grader_model fill in graders that didn't pick their own.
+    for g in graders:
+        if g.type == "llm_rubric":
+            g.provider = g.provider or defaults.get("grader_provider")
+            g.model = g.model or defaults.get("grader_model")
 
     spec = EvalSpec(
         name=str(name),
@@ -163,10 +177,20 @@ def _load_config(d: Path, cfg_path: Path, instruction: str | None, task: str | N
         docker_base=(docker.get("base") if isinstance(docker, dict) else None),
         docker_setup=(docker.get("setup") if isinstance(docker, dict) else None),
         graders=graders,
+        # skillgrade-style defaults, overridable from the command line (CLI > yaml > built-in).
+        default_harness=(task_def.get("agent") or defaults.get("agent") or defaults.get("harness")),
+        default_trials=_maybe_int(task_def.get("trials") or defaults.get("trials")),
     )
     if timeout:
         spec.timeout_sec = int(timeout)
     return spec
+
+
+def _maybe_int(value: object) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 # --------------------------------------------------------------------------- convention folder
@@ -215,27 +239,73 @@ def _load_grader_file(d: Path) -> list[GraderSpec]:
         if gp.is_file():
             raw = yaml.safe_load(gp.read_text(encoding="utf-8")) or {}
             items = raw.get("graders") if isinstance(raw, dict) else raw
-            return _parse_graders(items or [])
+            return _parse_graders(items or [], base=d)
     return []
 
 
-def _parse_graders(items: object) -> list[GraderSpec]:
-    """Normalize a list of grader dicts into :class:`GraderSpec`s (``run`` or ``command`` accepted)."""
+def _parse_graders(items: object, base: Path | None = None) -> list[GraderSpec]:
+    """Normalize a list of grader dicts into :class:`GraderSpec`s (``run`` or ``command`` accepted).
+
+    ``base`` (the config file's folder) resolves file references:
+    * ``rubric:`` may be a path to a text/markdown file — read here, so the spec carries the TEXT;
+    * a deterministic ``run:`` may call files kept next to the config (``run: node graders/check.js``)
+      — those are recorded in ``stage_paths`` and copied into the workspace only at grading time,
+      AFTER the agent is gone. The agent never sees the checks.
+    """
     graders: list[GraderSpec] = []
     for g in items if isinstance(items, list) else []:
         if not isinstance(g, dict):
             continue
+        command = g.get("run") or g.get("command")
         graders.append(
             GraderSpec(
                 type=str(g.get("type", "deterministic")),
-                command=g.get("run") or g.get("command"),
-                rubric=g.get("rubric"),
+                command=command,
+                rubric=_resolve_rubric(g.get("rubric"), base),
                 model=g.get("model"),
                 provider=g.get("provider"),
                 weight=float(g.get("weight", 1.0)),
+                stage_paths=_command_file_refs(command, base),
             )
         )
     return graders
+
+
+def _resolve_rubric(rubric: object, base: Path | None) -> str | None:
+    """A rubric is inline text, or a path to a file holding it. Files are read at load time."""
+    if not rubric:
+        return None
+    text = str(rubric)
+    if base is not None and len(text.splitlines()) == 1:
+        candidate = (base / text.strip()).resolve()
+        if candidate.is_file():
+            return candidate.read_text(encoding="utf-8")
+    return text
+
+
+#: Path-looking tokens in a grader command ("graders/check.js", "tests/verify.py"). Same idea as
+#: skillgrade's reference scan, tightened: must contain a "/" so bare words never match.
+_FILE_REF_RE = re.compile(r"[\w.-]+(?:/[\w.-]+)+")
+
+
+def _command_file_refs(command: str | None, base: Path | None) -> list[tuple[str, str]]:
+    """Files/dirs a grader command references, found next to the config file.
+
+    The TOP folder of each reference is staged whole (``graders/check.js`` stages ``graders/``),
+    so helpers the script imports come along — skillgrade's behaviour, ported.
+    """
+    if not command or base is None:
+        return []
+    staged: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for ref in _FILE_REF_RE.findall(command):
+        top = ref.split("/", 1)[0]
+        src = (base / top).resolve()
+        if top in seen or not src.exists() or not (base / ref).exists():
+            continue
+        seen.add(top)
+        staged.append((str(src), top))
+    return staged
 
 
 def _detect_skills(d: Path) -> tuple[list[str], str]:

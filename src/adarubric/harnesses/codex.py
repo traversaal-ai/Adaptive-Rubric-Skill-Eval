@@ -30,13 +30,22 @@ class CodexHarness(Harness):
     cli = "codex"
     env_keys = ("OPENAI_API_KEY",)
     skill_dirs = (".agents/skills",)  # codex discovers skills under .agents/skills (NOT .claude)
-    # Static musl binary from GitHub releases — no node required.
+    # Static musl binaries from GitHub releases — no node required. TWO binaries since codex
+    # 0.147: the CLI, plus `codex-code-mode-host`, shipped as a separate release asset. Without
+    # the second one the new codex "fails closed" — it starts, runs nothing, and every task
+    # scores 0 in a way that looks exactly like the agent failing (bit us on 2026-08-09).
     docker_install = (
         "curl -fsSL -o /tmp/codex.tar.gz "
         "https://github.com/openai/codex/releases/latest/download/codex-x86_64-unknown-linux-musl.tar.gz "
         "&& tar -xzf /tmp/codex.tar.gz -C /tmp "
         "&& mv /tmp/codex-x86_64-unknown-linux-musl /usr/local/bin/codex "
-        "&& chmod +x /usr/local/bin/codex && codex --version"
+        "&& chmod +x /usr/local/bin/codex "
+        "&& curl -fsSL -o /tmp/cmh.tar.gz "
+        "https://github.com/openai/codex/releases/latest/download/codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz "
+        "&& tar -xzf /tmp/cmh.tar.gz -C /tmp "
+        "&& mv /tmp/codex-code-mode-host-x86_64-unknown-linux-musl /usr/local/bin/codex-code-mode-host "
+        "&& chmod +x /usr/local/bin/codex-code-mode-host "
+        "&& rm -f /tmp/codex.tar.gz /tmp/cmh.tar.gz && codex --version"
     )
 
     def run(self, instruction: str, workspace: str, run_command: RunCommand) -> RunOutput:

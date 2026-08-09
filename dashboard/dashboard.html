@@ -472,7 +472,11 @@
     if (r.grading_error) return `<span class="pill warn" title="${esc(r.grading_error)}">grading failed</span>`;
     if (!r.graded || r.reward == null) return `<span class="dim">ungraded</span>`;
     const pct = Math.round(100 * r.reward);
-    return `<span class="rw"><span class="track"><span class="fill ${rewardClass(r.reward)}" style="width:${pct}%"></span></span><span class="n">${fmtReward(r.reward)}</span></span>`;
+    // Hovering the number shows how it was put together, one line per check that ran.
+    const mix = (r.graders || []).filter((g) => g.error == null && g.weight > 0)
+      .map((g) => `${GRADER_LABEL[g.type] || g.type} ${(g.score ?? 0).toFixed(2)} ×${g.weight}`).join("  +  ");
+    const tip = mix ? `weighted mix: ${mix}` : "";
+    return `<span class="rw" title="${esc(tip)}"><span class="track"><span class="fill ${rewardClass(r.reward)}" style="width:${pct}%"></span></span><span class="n">${fmtReward(r.reward)}</span></span>`;
   }
   function fileGroup(cls, label, kind, r) {
     const c = r.changes || {};
@@ -561,6 +565,62 @@
     return `<ul class="feed">${acts.slice().reverse().map((a) =>
       `<li><span class="t">${esc((a.ts || "").slice(11, 19))}</span><span>${esc(a.msg)}</span></li>`).join("")}</ul>`;
   }
+  // How the reward was put together, in THREE sections: the objective script checks, the static
+  // LLM judge (one fixed-or-generated rubric, one call), and the adaptive rubric (four generated
+  // tests, judged blind with quoted evidence — shown but weight 0 in the reward, for now).
+  const GRADER_LABEL = {
+    deterministic: "Script check",
+    skillbench_verifier: "Benchmark tests",
+    llm_rubric: "LLM judge",
+    adaptive_rubric: "Adaptive rubric",
+  };
+  function graderRow(g) {
+    const label = GRADER_LABEL[g.type] || g.type;
+    const score = g.error != null
+      ? `<span class="err">failed to run</span>`
+      : `<b>${(g.score ?? 0).toFixed(2)}</b>`;
+    const note = g.error != null
+      ? `This check broke (${esc(g.error)}) — it does not count toward the reward and is not the agent's fault.`
+      : esc(g.details || "");
+    const w = g.type === "adaptive_rubric"
+      ? `<span class="dim" title="recorded and shown, but not blended into the reward yet">×0 (comparison only)</span>`
+      : `<span class="dim">×${g.weight}</span>`;
+    return `<div class="fact"><span class="fk">${esc(label)} ${w}</span>` +
+           `<span class="fv">${score}${note ? `<br><span class="dim" style="white-space:pre-wrap">${note}</span>` : ""}${adaptiveTestsHTML(g)}</span></div>`;
+  }
+  function adaptiveTestsHTML(g) {
+    // One box per generated test: what was checked, the verdict, and the judge's QUOTED evidence.
+    const tests = g.tests || [];
+    if (!tests.length) return "";
+    const DIM = { completeness: "Completeness", skill_fidelity: "Skill fidelity", process_quality: "Process quality" };
+    const boxes = tests.map((t) => {
+      const ok = t.score >= 1 ? "ok" : (t.score > 0 ? "" : "err");
+      const verdict = t.verdict === "pass" ? "✓ pass" : (t.verdict === "fail" ? "✗ fail" : `level ${t.verdict}`);
+      return `<div style="border:1px solid var(--line,#3333);border-radius:8px;padding:8px 10px;margin-top:8px">
+        <div><b>${esc(DIM[t.dimension] || t.dimension || t.id)}</b> <span class="dim">×${t.weight}</span> · <span class="${ok}">${esc(verdict)}</span></div>
+        <div class="dim" style="margin-top:3px">${esc(t.check || "")}</div>
+        ${t.evidence ? `<div style="margin-top:5px"><span class="dim">evidence:</span> <span class="mono" style="white-space:pre-wrap">${esc(t.evidence)}</span></div>` : ""}
+        ${t.reasoning ? `<div class="dim" style="margin-top:3px">${esc(t.reasoning)}</div>` : ""}
+      </div>`;
+    }).join("");
+    return `${g.judge ? `<div class="dim" style="margin-top:4px">judge: ${esc(g.judge)}</div>` : ""}${boxes}`;
+  }
+  function gradersHTML(r) {
+    const gs = r.graders || [];
+    if (!gs.length) return `<div class="none">No checks ran for this run.</div>`;
+    const sections = [
+      ["Script checks — objective, run in the workspace", gs.filter((g) => g.type === "deterministic" || g.type === "skillbench_verifier")],
+      ["Static LLM rubric — one rubric, whole session, one call", gs.filter((g) => g.type === "llm_rubric")],
+      ["Adaptive rubric — 4 generated tests, judged blind with quoted evidence", gs.filter((g) => g.type === "adaptive_rubric")],
+    ];
+    const html = sections.map(([title, rows]) => rows.length
+      ? `<div style="margin-top:10px"><div class="dim" style="margin-bottom:4px"><b>${title}</b></div><div class="facts">${rows.map(graderRow).join("")}</div></div>`
+      : "").join("");
+    const hint = r.graded
+      ? `<div class="none" style="padding-top:8px">Reward ${fmtReward(r.reward)} = the weighted mix of the script checks and the static rubric. The adaptive rubric is shown for comparison and does not move the reward yet.</div>`
+      : "";
+    return `${html}${hint}`;
+  }
   function renderRunPage(key) {
     const r = runs.find((x) => x._key === key);
     if (!r) { $("detail").innerHTML = `<a class="back" href="#">← All runs</a><p class="empty">Run not found.</p>`; return; }
@@ -602,6 +662,7 @@
           ${fileGroup("add", "Created", "created", r)}${fileGroup("mod", "Modified", "modified", r)}${fileGroup("del", "Deleted", "deleted", r)}
         </div></div>
         <div class="block"><h3>Sandbox activity — built / copied to docker / staged</h3>${activityHTML(r)}</div>
+        <div class="block wide"><h3>Score breakdown — every check that ran, and why it scored what it did</h3>${gradersHTML(r)}</div>
         <div class="block wide">
           <h3>Details</h3>
           <div class="facts">

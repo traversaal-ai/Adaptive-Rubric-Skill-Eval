@@ -73,6 +73,21 @@ def _vendor_tool_name(update: dict) -> str | None:
     return None
 
 
+def _pick_auth_method(methods: list, env_names: set[str]) -> str | None:
+    """The id of the auth method to use: prefer one whose declared env vars we injected, else the
+    first offered. ``None`` when the agent advertised nothing (then auth can't be satisfied)."""
+    ids = [m.get("id") for m in methods if isinstance(m, dict) and m.get("id")]
+    if not ids:
+        return None
+    for m in methods:
+        if not isinstance(m, dict):
+            continue
+        declared = {v.get("name") for v in (m.get("vars") or []) if isinstance(v, dict)}
+        if declared and declared <= env_names:
+            return m.get("id")
+    return ids[0]
+
+
 def _session_model(session: dict) -> str | None:
     """Best-effort model name from an ACP ``session/new`` response.
 
@@ -189,7 +204,8 @@ class AcpHarness(Harness):
         # Local workspaces are real host directories, so fs/ requests are served directly. A container
         # workspace is not on this filesystem, so those requests are served through the sandbox shell.
         files: _Files = _HostFiles(session_cwd) if local else _SandboxFiles(run_command)
-        conn = AcpConnection(proc, session_cwd, files=files)
+        conn = AcpConnection(proc, session_cwd, files=files,
+                             auth_env_names=set(self.launch_env or ()) | set(self.env_keys or ()))
         try:
             return conn.run_prompt(instruction)
         except Exception as exc:  # noqa: BLE001 - see below
@@ -231,10 +247,14 @@ class AcpConnection:
         proc: "subprocess.Popen[str]",
         cwd: str,
         files: _Files | None = None,
+        auth_env_names: set[str] | None = None,
     ) -> None:
         #: The session's working directory as the AGENT sees it (a container path under docker).
         self.cwd = cwd
         self.proc = proc
+        #: Names (never values) of env vars we injected into the agent — used to pick which of the
+        #: agent's advertised authentication methods can actually work.
+        self._auth_env_names = auth_env_names or set()
         self._files = files if files is not None else _HostFiles(cwd)
         self._id = 0
         self._text: list[str] = []
@@ -516,11 +536,23 @@ class AcpConnection:
     # ------------------------------------------------------------------ flow
 
     def run_prompt(self, instruction: str) -> RunOutput:
-        self._request("initialize", {
+        init = self._request("initialize", {
             "protocolVersion": _PROTOCOL_VERSION,
             "clientCapabilities": {"fs": {"readTextFile": True, "writeTextFile": True}},
         })
-        session = self._request("session/new", {"cwd": self.cwd, "mcpServers": []})
+        try:
+            session = self._request("session/new", {"cwd": self.cwd, "mcpServers": []})
+        except AcpError as exc:
+            # Some agents (codex-acp) refuse session/new until the client sends `authenticate`,
+            # even when the API key env var is already set — gemini and claude-code-acp never ask,
+            # which is why this path went unexercised. Pick the advertised method whose env vars we
+            # actually injected, authenticate, and retry ONCE.
+            method = _pick_auth_method(init.get("authMethods") or [], self._auth_env_names)
+            if method is None or "auth" not in str(exc).lower():
+                raise
+            self._log_wire("!!", f"agent requires authentication - using method '{method}'")
+            self._request("authenticate", {"methodId": method})
+            session = self._request("session/new", {"cwd": self.cwd, "mcpServers": []})
         session_id = session.get("sessionId")
         if not session_id:
             raise AcpError("session/new returned no sessionId")

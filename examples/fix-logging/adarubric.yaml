@@ -4,6 +4,12 @@
 # The agent gets orders.py (full of print statements) and applog.py (the house logger).
 # It does NOT get this file, or the skills/ folder's own control files.
 
+# Fallbacks for when the command line doesn't say. Precedence: CLI flag > this block > built-ins,
+# so `--harness codex --trials 5` overrides both lines.
+defaults:
+  agent: claude-code
+  trials: 1
+
 instruction: |
   orders.py is full of leftover print statements from debugging. Clean it up.
 
@@ -21,7 +27,7 @@ timeout: 300
 # Written as a python one-liner so it behaves the same under bash and Windows cmd.
 graders:
   - type: deterministic
-    weight: 1.0
+    weight: 0.7
     run: >-
       python -c "import json,os,re,subprocess,sys;
       p='orders.py';
@@ -37,3 +43,9 @@ graders:
       ('still-runs',bool(r) and r.returncode==0)];
       n=sum(1 for _,v in c if v);
       print(json.dumps({'score':round(n/len(c),2),'details':'; '.join(('ok ' if v else 'MISS ')+k for k,v in c)}))"
+
+  # An LLM judge reads the whole session (instruction, commands, output, the script check's result)
+  # and scores it against the rubric file below. Runs by default; turn off with --llm-rubric no.
+  - type: llm_rubric
+    rubric: prompts/quality.md
+    weight: 0.3

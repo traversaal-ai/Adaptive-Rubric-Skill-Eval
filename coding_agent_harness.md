@@ -95,11 +95,11 @@ Notes that matter:
 | Harness | Verified | Notes |
 |---|---|---|
 | `claude-code` | ✅ Docker | richest signal; reports real cost |
-| `codex` | ✅ Docker | reports no model, no cost |
+| `codex` | ✅ Docker | reports no model, no cost. Installer fetches TWO binaries since codex 0.147 (`codex` + `codex-code-mode-host`) — with only the first, codex starts but runs nothing and scores 0 |
 | `gemini-cli` | ✅ Docker | `skill_opened: true` measured from its tool tally |
-| `acp` + gemini | ⚠️ partial | reaches and runs the agent; needs one clean confirmation |
-| `acp` + claude | ⚠️ partial | completed and scored; skill detection unconfirmed against real traffic |
-| `acp` + codex | ❌ not yet | |
+| `acp` + gemini | ✅ Docker | multiple clean scored runs (flood-risk 1.00, threejs, …) |
+| `acp` + claude | ✅ Docker | clean scored run (flood-risk 1.00) via `@zed-industries/claude-code-acp` |
+| `acp` + codex | ✅ Docker | via `@zed-industries/codex-acp`; requires the ACP `authenticate` step — the client picks the auth method matching the injected env key and retries once |
 | `oracle` | ✅ Docker | |
 
 ---
@@ -205,6 +205,18 @@ uv run adarubric run <task> --harness acp \
     --acp-env-key ANTHROPIC_API_KEY \
     --acp-install "curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
                    && apt-get install -y nodejs && npm i -g @zed-industries/claude-code-acp" \
+    --dataset skillbench --sandbox docker --env-file .env
+```
+
+```bash
+# codex, via the Zed bridge — NOTE: codex-acp demands the ACP `authenticate` step; the client
+# handles it (picks the auth method matching the env key it injected, then retries session/new).
+uv run adarubric run <task> --harness acp \
+    --acp-cmd 'codex-acp' \
+    --acp-skill-dir '.agents/skills' \
+    --acp-env-key OPENAI_API_KEY \
+    --acp-install "curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+                   && apt-get install -y nodejs && npm i -g @zed-industries/codex-acp" \
     --dataset skillbench --sandbox docker --env-file .env
 ```
 

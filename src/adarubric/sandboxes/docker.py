@@ -315,7 +315,10 @@ class DockerSandbox(Sandbox):
         )
 
     def stage(self, workspace: str, host_src: str, dest: str) -> None:
-        # dest is an absolute container path (e.g. /verifier). Ensure parent exists, then docker cp.
+        # dest: absolute container path (e.g. /verifier), or workdir-relative (grader helper files
+        # like `run: node graders/check.js`, which must land next to where the command runs).
+        if not dest.startswith("/"):
+            dest = f"{self._workdirs.get(workspace, _GENERIC_WORKDIR)}/{dest}"
         self._note(f"staging grader → {dest} (after the agent finished)")
         parent = dest.rsplit("/", 1)[0] or "/"
         _docker("exec", workspace, "sh", "-c", f"mkdir -p '{parent}'")

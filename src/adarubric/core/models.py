@@ -308,10 +308,17 @@ class GraderSpec:
 
     type: str  # "deterministic" | "llm_rubric"
     command: str | None = None  # deterministic: shell command to run
-    rubric: str | None = None  # llm_rubric: rubric text or file path
+    rubric: str | None = None  # llm_rubric: rubric TEXT (file paths are resolved at load time)
     model: str | None = None  # llm_rubric: model override
     provider: str | None = None  # llm_rubric: "gemini" | "anthropic" | "openai"
     weight: float = 1.0
+    #: deterministic only: files/dirs the command needs (e.g. ``run: node graders/check.js``),
+    #: found next to the config at load time. Staged into the workspace AFTER the agent is gone,
+    #: right before the command runs — the agent never sees them. (host src, workspace-relative dest)
+    stage_paths: list[tuple[str, str]] = field(default_factory=list)
+    #: True when WE added this grader (the default llm rubric), not the task's author. An auto
+    #: grader that can't run is silently skipped; one the author asked for reports a grading error.
+    auto: bool = False
 
 
 @dataclass
@@ -349,6 +356,20 @@ class EvalSpec:
     graders: list[GraderSpec] = field(default_factory=list)  # Step 2-3
     verifier_path: str | None = None  # Step 2 (SkillsBench verifier/)
     oracle_path: str | None = None  # Step 5 (SkillsBench oracle/solve.sh)
+    #: Run the LLM judge by default on every graded run (skillbench and generic alike). When the
+    #: task defines no llm_rubric of its own, a default one (built-in static rubric, weight 0.3) is
+    #: added — IF a judge API key is available. ``--llm-rubric no`` turns all of this off.
+    run_llm_rubric: bool = True
+    #: Run the ADAPTIVE rubric (step 8): four task-specific tests generated from the instruction +
+    #: SKILL.md, judged blind, one call per test. Recorded and displayed but weight 0 in the reward
+    #: until it proves itself against static. ``--adaptive-rubric no`` turns it off.
+    run_adaptive_rubric: bool = True
+    adaptive_provider: str | None = None  # --adaptive-provider (generator + judge)
+    adaptive_model: str | None = None  # --adaptive-model
+
+    # Defaults a config file may carry (CLI flags override these; built-ins fill what's left).
+    default_harness: str | None = None  # defaults.agent / defaults.harness in the yaml
+    default_trials: int | None = None  # defaults.trials
 
     # Run settings
     attempts: int = 1

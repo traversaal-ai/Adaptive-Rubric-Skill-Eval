@@ -44,7 +44,13 @@ The 0.5 row matters: switching to `logging` is a genuinely good fix. It's just n
 ## Why a yaml here
 
 This task needs files in the workspace before the agent starts, and the plain
-`TASK.md` + `grader.yaml` folder can't ship those. See
-[`../release-notes/`](../release-notes/) for that simpler shape.
+`TASK.md` + `grader.yaml` folder can't ship those.
 
 `adarubric.yaml` is never copied into the workspace, so the agent can't read the grader.
+
+## The LLM judge
+
+Besides the script check (weight 0.7), an LLM judge reads the whole session and scores it against
+[prompts/quality.md](prompts/quality.md) (weight 0.3) — workflow, naming, efficiency. It runs by
+default when a judge API key is in your `--env-file` (gemini picked first); turn it off with
+`--llm-rubric no`. The run page on the dashboard shows both scores and the judge's reasoning.

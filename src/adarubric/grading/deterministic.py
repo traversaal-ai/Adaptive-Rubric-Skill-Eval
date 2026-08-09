@@ -76,6 +76,10 @@ class DeterministicGrader(Grader):
         if not command:
             return GraderResult("deterministic", 0.0, grader_spec.weight,
                                 "no `run` command in grader spec", error="grader is misconfigured")
+        # Files the command needs (e.g. `run: node graders/check.js`) go in NOW — after the agent
+        # has finished and its workspace was exported, so the agent never saw its own checks.
+        for host_src, dest_rel in grader_spec.stage_paths:
+            sandbox.stage(workspace, host_src, dest_rel)
         res = sandbox.run_command(workspace, command, env)
         score, how = parse_score(res.stdout, res.exit_code)
         detail = f"{how}; exit={res.exit_code}"

@@ -77,6 +77,10 @@ you, and any time every agent mysteriously scores zero.
 
 ### 1. Your own task
 
+> **Don't want to write the file yourself?** `uv run adarubric init my-task` reads your `SKILL.md`
+> and writes `adarubric.yaml` for you — with an API key an LLM drafts the instruction, a script
+> check, and the llm rubric; without one you get a commented template. Review it, then run.
+
 A task is always the same three things: **an instruction** (what to do), **a skill** (the help), and
 **a grader** (how to score it). You write one file — `adarubric.yaml` — and lay the folder out one of
 two ways. The only question that picks between them: *does the agent start with files, or an empty
@@ -116,6 +120,9 @@ fix-logging/
 The same `adarubric.yaml` works for both — Layout A simply has no `workspace:` list:
 
 ```yaml
+defaults:                           # used when the command line doesn't say (flags override these)
+  agent: claude-code
+  trials: 1
 instruction: |
   orders.py is full of leftover print statements. Clean it up.
 workspace:                          # Layout B only: files to place in front of the agent
@@ -123,8 +130,11 @@ workspace:                          # Layout B only: files to place in front of 
 timeout: 300
 graders:
   - type: deterministic
-    run: python check.py            # prints {"score": 0..1}, or "REWARD SCORE: x",
-    weight: 1.0                     # or just exits 0 (pass) / 1 (fail)
+    run: python graders/check.py    # prints {"score": 0..1}, or "REWARD SCORE: x", or exit 0/1.
+    weight: 0.7                     # files it calls (graders/…) stay hidden until the agent is done
+  - type: llm_rubric                # an LLM judge reads the whole session and scores it
+    rubric: prompts/quality.md      # a file, or inline text
+    weight: 0.3
 ```
 
 ```bash
@@ -143,22 +153,22 @@ Two copies, two doors: `workspace:` files land on the desk, the skill lands in t
 whichever agent is running (`.claude/skills/` for claude-code, `.agents/skills/` for codex, …).
 `adarubric.yaml` itself is **never copied in** — the agent can't read its own marking scheme.
 
-Worked, runnable versions of both are in this repo:
+A worked, runnable Layout B lives in this repo — [`examples/fix-logging/`](examples/fix-logging/):
+broken code to fix, a skill saying how the house logs, a script check that also runs the program,
+and an LLM-judge rubric. Its README says what score to expect from an agent that follows the skill,
+one that skims it, and one that never sees it — so you know what a number means before spending
+anything.
 
-| | layout | run it |
-|---|---|---|
-| [`examples/release-notes/`](examples/release-notes/) | A — empty desk, writing task | `uv run adarubric run examples/release-notes --harness claude-code --env-file .env` |
-| [`examples/fix-logging/`](examples/fix-logging/) | B — ships broken code | `uv run adarubric run examples/fix-logging --harness claude-code --env-file .env` |
-
-Each example's README says what score to expect from an agent that follows the skill, one that
-skims it, and one that never sees it — so you know what a number means before spending anything.
+```bash
+uv run adarubric run examples/fix-logging --env-file .env    # defaults.agent picks claude-code
+```
 
 <details>
 <summary>Shortcuts and extras (optional)</summary>
 
 - **`TASK.md` + `grader.yaml`** — instead of `adarubric.yaml` you can put the instruction in a
-  `TASK.md` and the checks in a `grader.yaml` (that's what `examples/release-notes/` does). Same
-  meaning, no `workspace:` support. If `adarubric.yaml` exists, it wins and these are ignored.
+  `TASK.md` and the checks in a `grader.yaml`. Same meaning, no `workspace:` and no `defaults:`
+  support. If `adarubric.yaml` exists, it wins and these are ignored.
 - **No grader at all** — leave `graders:` out and the run still works: you get turns, tool calls,
   cost, and whether the skill was opened. Just no score.
 - **`--instruction "..."`** on the command line overrides the file.
@@ -226,6 +236,55 @@ skill is worth**, and it's the question the benchmark exists to ask.
 The run still records *which* skills were withheld (`skills: [...]` plus `skills_injected: false`),
 so a control run can never be mistaken for a task that simply has no skills.
 
+### The LLM judge (on by default)
+
+Every run gets two kinds of scoring:
+
+1. **Script checks** — the task's own `deterministic` graders, or the SkillsBench verifier. Objective,
+   free, but they only see the final files.
+2. **An LLM judge** — reads the whole session (instruction, commands and their output, the agent's
+   answer, and the script checks' results) and scores it 0–1 against a rubric, with its reasoning
+   saved. This is the only grader that can see *how* the agent worked, not just what it left behind.
+
+The judge runs **by default on both your own tasks and SkillsBench tasks**. Turn it off with
+`--llm-rubric no`. Which rubric it reads:
+
+- the task's own `llm_rubric` grader, when it defines one (file or inline text);
+- otherwise one is **generated for the task** — an LLM reads the instruction + `SKILL.md` (never
+  the verifier) and writes task-specific criteria. Generated once, cached in
+  `<output>/rubrics/<task>.md`, shared by every agent so scores stay comparable. The task folder
+  itself is never touched — SkillsBench tasks stay pristine;
+- if generation can't run, a **built-in general rubric** (compliance / guidance / efficiency)
+  steps in. Weight 0.3 next to the other checks either way.
+
+The judge needs its own API key — `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENAI_API_KEY`, from
+`--env-file` or your shell, gemini picked first (same order as skillgrade). No key → the default
+judge is skipped quietly and script checks still run; a judge the task explicitly asked for reports
+**grading failed** instead. Either way a broken judge is never scored as 0. The judge's prompt is
+skillgrade's, word for word, so scores line up; its keys are handed to the judge only and never
+enter the sandbox. Each run's page on the dashboard shows the full **score breakdown** — every
+check's score, weight, and the judge's reasoning.
+
+This judge is the **static** rubric — one text, one call, and it sees the script checks' verdicts.
+Its known weaknesses (scores bunch high, never reads `SKILL.md`, anchors on the script verdict)
+are what the **adaptive rubric** — this project's research contribution — exists to fix.
+
+### The adaptive rubric (on by default, weight 0)
+
+For every task, an LLM writes **four task-specific tests** from the instruction + `SKILL.md` +
+the task's folder layout (never the verifier): one completeness check, **two skill-fidelity
+checks** (did it do things the skill's specific way — the research question, so it gets double
+weight), and one process-quality check with task-specific levels. Cached in
+`<output>/rubrics/<task>.adaptive.json`, so every agent is scored against identical tests.
+
+Each test is judged in its own LLM call, **blind** (the adaptive judge never sees the other
+scores) and under the **evidence rule**: a pass without a quoted line of proof from the session
+is a fail. The run page shows all three sections side by side — script checks, static judge,
+adaptive tests with their evidence — but the adaptive score is **not blended into the reward**
+until it beats static on the metrics in
+[`converting/step-8-adaptive-rubric.md`](converting/step-8-adaptive-rubric.md).
+`--adaptive-rubric no` turns it off.
+
 ### Files you write vs files we generate
 
 | File | Written by | In/out | Holds |
@@ -243,7 +302,7 @@ so a control run can never be mistaken for a task that simply has no skills.
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `<path>` | — | a skill folder or a SkillsBench task |
-| `--harness` | *(required)* | `claude-code` \| `gemini-cli` \| `codex` \| `acp` \| `oracle`. Comma-separate for several. Pin a model with `name:model`. No auto-detection. |
+| `--harness` | task's `defaults.agent` | `claude-code` \| `gemini-cli` \| `codex` \| `acp` \| `oracle`. Comma-separate for several. Pin a model with `name:model`. Required when the task sets no default. |
 | `--sandbox` | `local` | `local` (temp dir on your machine) or `docker` (container; required for SkillsBench) |
 | `--model` | *(agent's own)* | one model for every harness; `name:model` in `--harness` overrides it |
 | `--inject-skills` | `yes` | `no` withholds the skills — the control half of "did the skill help?". Takes yes/no, true/false, 1/0, on/off. |
@@ -251,10 +310,14 @@ so a control run can never be mistaken for a task that simply has no skills.
 | `--instruction` | — | overrides `TASK.md` / `task.md` / the config |
 | `--task` | first | pick one task from a multi-task `adarubric.yaml` |
 | `--output` | `output` | results go to `<output>/<harness>/<task>/attempt-N/` |
-| `--trials` | `1` | repeats inside this launch |
+| `--trials` | task's `defaults.trials`, else `1` | repeats inside this launch |
 | `--timeout` | config/300 | seconds allowed per agent run |
 | `--grade / --no-grade` | `--grade` | run the checks after the agent finishes |
+| `--llm-rubric` | `yes` | also have an LLM judge score every run (see below). `no` turns it off. |
+| `--adaptive-rubric` | `yes` | also score with 4 generated task-specific tests, judged blind with quoted evidence — shown next to the other scores, **weight 0 in the reward**. `--adaptive-provider` / `--adaptive-model` override the LLM. |
 | `--env-file` | — | load `KEY=VALUE` API keys from a file |
+
+For anything that exists both as a flag and in the yaml: **flag > the task's `defaults:` > built-in.**
 
 **ACP-only flags** (see [`coding_agent_harness.md`](coding_agent_harness.md)):
 
@@ -309,8 +372,11 @@ EvalRunner.run(harness, spec, trials):
                copy each skill into the folder THAT agent looks in
      snapshot files  →  the agent runs  →  snapshot again, diff
      copy the agent's files out
-     GRADE     only now: the grader is copied in AFTER the agent is gone
-     write run.json / grading.json / transcript.json / changes.json / prompt.md / raw.log
+     GRADE     only now, in order: script checks / verifier  →  static LLM judge
+               →  adaptive rubric (4 blind judge calls, weight 0) — each verdict
+               joins the transcript, so the static judge sees the script results
+               (ported behaviour) while the adaptive judge is blind by construction
+     write run.json / grading.json / rubric.md / transcript.json / changes.json / prompt.md / raw.log
      destroy the container
 ```
 
@@ -348,13 +414,18 @@ inside it.
 
 ```
 output/
+  rubrics/                      # per-task generated rubrics, shared by every agent
+    <task>.md                   #   the static judge's generated rubric text
+    <task>.adaptive.json        #   the adaptive rubric's four tests
   claude-code/
     invoice-fraud-detection/
       attempt-1/
         eval.yaml               # what was run (host-only; never in the container)
         trial-1/
           run.json              # every metric
-          grading.json          # reward + what each check said
+          grading.json          # reward + what every check said (incl. the adaptive
+                                #   per-test verdicts with their quoted evidence)
+          rubric.md             # the exact rubric text the static judge used, with its origin
           transcript.json       # ordered event log, secrets redacted
           changes.json          # files created / modified / deleted
           raw.log               # the agent's raw output (for ACP: the full protocol transcript)
@@ -517,6 +588,14 @@ Straight, so you're not surprised:
   ([gemini-cli#24280](https://github.com/google-gemini/gemini-cli/issues/24280)).
 - **Activity feeds are per-invocation.** `status.json` is rewritten by each run, so an earlier run's
   build/copy timeline is gone once you start another.
+- **Judge-on-by-default changes SkillsBench comparability.** With the static judge blended (0.3),
+  rewards differ slightly from the paper's verifier-only numbers — use `--llm-rubric no` for
+  paper-faithful runs. The adaptive rubric never affects the reward (weight 0).
+- **The adaptive judge only trusts what it can see.** Its evidence pack is commands + outputs +
+  file diff + heads of created files + SKILL.md. Anything outside that (a claim in prose, a
+  binary file's contents) can't earn a pass — by design.
+- **Judges cost money.** Static = 1 small call per trial, adaptive = 4, rubric generation = 1 per
+  task (cached). All on the gemini-first key rule; no key → they skip quietly.
 
 ---
 
@@ -524,12 +603,14 @@ Straight, so you're not surprised:
 
 | Phase | Status |
 |-------|--------|
-| **1 — Running** | 🟢 two pipelines, local + Docker, four harnesses + oracle, model pinning, skills on/off |
+| **1 — Running** | 🟢 two pipelines, local + Docker, four harnesses (direct + over ACP) + oracle, model pinning, skills on/off |
 | **2 — Deterministic grading** | 🟢 SkillsBench verifier + your own checks, isolation-guarded, "grading failed" separated from a real zero |
+| **3 — LLM-rubric grading (static)** | 🟢 skillgrade's judge ported verbatim; per-task generated rubric for tasks without one; on by default, `--llm-rubric no` |
 | **5 — Task validation** | 🟢 `adarubric check` runs the reference solution before you spend anything |
-| 3 — LLM-rubric grading | ⚪ planned |
+| **7 — Init** | 🟢 `adarubric init` — an LLM drafts `adarubric.yaml` (instruction + checks + rubric) from your SKILL.md |
+| **8 — Adaptive rubric** | 🔵 core built + first live run — 4 generated tests, blind evidence-quoting judge, weight 0; comparison harness pending |
 | 4 — Aggregation (pass@k) | ⚪ planned |
-| 6 — Reporting · 7 — Init | ⚪ planned |
+| 6 — Reporting | ⚪ planned |
 
 ---
 

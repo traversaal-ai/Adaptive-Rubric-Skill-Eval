@@ -55,6 +55,9 @@ from adarubric.core.models import (
 from adarubric.core.pricing import estimate_cost, is_specific_model
 from adarubric.core.skill_depth import classify as classify_skill_depth
 from adarubric.grading import create_grader
+from adarubric.grading.adaptive_rubric import generated_adaptive_rubric
+from adarubric.grading.static_rubric import DEFAULT_RUBRIC, pick_provider
+from adarubric.grading.static_rubric.generate import generated_task_rubric
 from adarubric.harnesses.oracle import ORACLE_DIR
 
 
@@ -85,11 +88,15 @@ class EvalRunner:
         output_root: str = "output",
         reporter: ProgressReporter | None = None,
         grade: bool = True,
+        judge_env: dict[str, str] | None = None,
     ) -> None:
         self.sandbox = sandbox
         self.output_root = output_root
         self.reporter = reporter  # None → no live tracking; guarded at every emit
         self.grade = grade
+        # Judge API keys (from --env-file), handed ONLY to the llm_rubric grader — which runs on the
+        # host. They never enter the sandbox and never reach the agent or third-party check scripts.
+        self.judge_env = dict(judge_env or {})
 
     # ------------------------------------------------------------------ public
 
@@ -210,6 +217,8 @@ class EvalRunner:
         reward = 0.0
         graded = False
         grading_error: str | None = None
+        rubric_used: str | None = None  # exact rubric text the judge scored against, if it ran
+        rubric_source: str | None = None
 
         # The oracle harness needs the task's reference solution inside the sandbox. Staged ONLY for
         # that harness, before the snapshot so its own files aren't counted as the agent's changes.
@@ -248,6 +257,16 @@ class EvalRunner:
             self._emit("stage_changed", harness.name, _safe(spec.name), attempt, TrialStage.EXPORTING, trial=trial_id)
             after = self.sandbox.list_files(workspace)
             changes = _diff(before, after)
+            # The file diff + tool usage join the transcript as judge-readable evidence. Vital for
+            # ACP runs: those agents run tools inside their own process, so the "command" entries
+            # are nearly empty and file changes are the only hard proof of what the agent produced.
+            transcript.append(TranscriptEntry(
+                type="changes", timestamp=_now(),
+                output=json.dumps({
+                    "created": changes.created[:80], "modified": changes.modified[:80],
+                    "deleted": changes.deleted[:80],
+                    "tools_used": run_output.tool_counts or {},
+                })))
             t = time.perf_counter()
             try:
                 self.sandbox.export_workspace(workspace, str(out_dir / "workspace"))
@@ -266,22 +285,44 @@ class EvalRunner:
             else:
                 success = True
                 # --- grade (only now; the agent has finished and its state is captured) ---
-                specs = self._grader_specs(spec)
+                specs = self._grader_specs(spec, harness, {**run_env, **self.judge_env})
                 if self.grade and specs:
                     self._emit("stage_changed", harness.name, _safe(spec.name), attempt, TrialStage.GRADING, trial=trial_id)
                     for gs in specs:
+                        # The judge's keys go to the llm grader only (it calls out from the host);
+                        # deterministic checks run inside the sandbox and must not see them.
+                        genv = {**run_env, **self.judge_env} if gs.type == "llm_rubric" else run_env
+                        if gs.type == "llm_rubric":
+                            # The EXACT rubric text the judge scored against, kept with the trial —
+                            # a judge score without its rubric can't be audited or reproduced.
+                            rubric_used = (gs.rubric or "").strip() or DEFAULT_RUBRIC
+                            if not (gs.rubric or "").strip():
+                                rubric_source = "built-in default"
+                            elif gs.auto:
+                                rubric_source = ("generated from the task's instruction + SKILL.md"
+                                                 " (cached in <output>/rubrics/)")
+                            else:
+                                rubric_source = "task-defined"
                         try:
-                            grader_results.append(
-                                create_grader(gs.type).grade(workspace, self.sandbox, gs, spec, transcript, run_env))
+                            result = create_grader(gs.type).grade(
+                                workspace, self.sandbox, gs, spec, transcript, genv)
                         except Exception as gexc:  # noqa: BLE001 - a crashing grader must not kill the run
-                            grader_results.append(GraderResult(
+                            result = GraderResult(
                                 gs.type, 0.0, gs.weight, f"grader error: {gexc}",
-                                error=f"grader crashed: {gexc}"))
-                    # Only results that reached a verdict count toward the reward. If NONE did, the
-                    # run is unscored — reporting reward 0.0 here would blame the agent for a check
-                    # script that never ran (a broken verifier, the wrong sandbox, a crash).
-                    scored = [g for g in grader_results if g.error is None]
-                    problems = [g.error for g in grader_results if g.error]
+                                error=f"grader crashed: {gexc}")
+                        grader_results.append(result)
+                        # Each verdict joins the transcript, so a later llm_rubric judge sees the
+                        # deterministic checks' results — same evidence skillgrade's judge gets.
+                        transcript.append(TranscriptEntry(
+                            type="grader", timestamp=_now(), grader_result=result))
+                    # Only results that reached a verdict count toward the reward — and only those
+                    # with weight > 0 (the adaptive rubric is weight 0: recorded, displayed, never
+                    # blended). If NONE did, the run is unscored — reporting reward 0.0 here would
+                    # blame the agent for a check script that never ran.
+                    scored = [g for g in grader_results if g.error is None and g.weight > 0]
+                    # A weight-0 grader (adaptive, research-only) failing must not stamp the whole
+                    # run "grading failed" — its error stays visible on its own row in grading.json.
+                    problems = [g.error for g in grader_results if g.error and g.weight > 0]
                     grading_error = "; ".join(problems) if problems else None
                     if scored:
                         reward = _weighted(scored)
@@ -320,6 +361,13 @@ class EvalRunner:
                         {"reward": reward if graded else None, "graded": graded,
                          "grading_error": grading_error,
                          "grader_results": [asdict(g) for g in grader_results]})
+        # The rubric the judge actually used, copied INTO the trial folder — a judge score whose
+        # rubric isn't saved next to it can't be audited, and the adaptive rubric (step 8) will
+        # write a different text per task into this same file.
+        if rubric_used is not None:
+            (out_dir / "rubric.md").write_text(
+                f"<!-- rubric used by the LLM judge · source: {rubric_source} -->\n\n{rubric_used}",
+                encoding="utf-8")
         (out_dir / "prompt.md").write_text(redact(spec.instruction), encoding="utf-8")
         (out_dir / "raw.log").write_text(raw, encoding="utf-8")
 
@@ -332,11 +380,59 @@ class EvalRunner:
 
     # ------------------------------------------------------------------ helpers
 
-    def _grader_specs(self, spec: EvalSpec) -> list[GraderSpec]:
-        """The graders to apply: the SkillsBench verifier (skillbench) or the config's graders."""
+    #: Weight of the default llm rubric when WE add it next to the task's own checks — same split
+    #: skillgrade's examples use (0.7 deterministic / 0.3 judge, so ~23% of a weight-1.0 check).
+    _DEFAULT_LLM_WEIGHT = 0.3
+
+    def _grader_specs(
+        self, spec: EvalSpec, harness: Harness, env: dict[str, str] | None
+    ) -> list[GraderSpec]:
+        """The graders to apply: the SkillsBench verifier (skillbench) or the config's graders —
+        plus, by default, the LLM judge with the built-in static rubric.
+
+        The judge is added when: it's enabled (``--llm-rubric no`` turns it off), the task didn't
+        define its own llm_rubric, a judge API key is actually available, and this isn't the free
+        oracle health-check (judging a scripted solution would cost money and mean nothing). The
+        auto-added judge is ordered LAST so it sees every other verdict in the transcript.
+        """
         if spec.mode == "skillbench" and spec.verifier_path:
-            return [GraderSpec(type="skillbench_verifier", weight=1.0)]
-        return list(spec.graders)
+            specs = [GraderSpec(type="skillbench_verifier", weight=1.0)]
+        else:
+            specs = list(spec.graders)
+        if (
+            spec.run_llm_rubric
+            and not getattr(harness, "runs_oracle", False)
+            and not any(g.type == "llm_rubric" for g in specs)
+            and pick_provider(None, env) is not None
+        ):
+            # Task has no rubric of its own (all of SkillsBench) → give it the same treatment
+            # `init` gives user skills: an LLM writes one from the task's instruction + SKILL.md.
+            # Generated ONCE per task, cached in <output>/rubrics/, shared by every harness so
+            # scores stay comparable. The task folder itself is never touched. If generation
+            # can't run, the built-in DEFAULT_RUBRIC steps in (rubric=None → grader default).
+            rubric = generated_task_rubric(spec, env, self.output_root)
+            specs.append(GraderSpec(
+                type="llm_rubric", rubric=rubric, weight=self._DEFAULT_LLM_WEIGHT, auto=True))
+        # The ADAPTIVE rubric (step 8) — ordered LAST, after the static judge, so static's inputs
+        # are exactly what they were before adaptive existed. Weight 0.0: recorded and displayed,
+        # never blended into the reward until it beats static on the step-8 metrics. No criteria
+        # generated (no key / API down / bad JSON) → skipped entirely; there is no generic
+        # fallback for a rubric whose whole point is being task-specific.
+        if (
+            spec.run_adaptive_rubric
+            and self.grade
+            and not getattr(harness, "runs_oracle", False)
+            and pick_provider(spec.adaptive_provider, env) is not None
+        ):
+            criteria = generated_adaptive_rubric(
+                spec, env, self.output_root,
+                provider=spec.adaptive_provider, model=spec.adaptive_model)
+            if criteria is not None:
+                specs.append(GraderSpec(
+                    type="adaptive_rubric", rubric=json.dumps({"criteria": criteria}),
+                    provider=spec.adaptive_provider, model=spec.adaptive_model,
+                    weight=0.0, auto=True))
+        return specs
 
     def _manifest(self, spec: EvalSpec, harness: Harness) -> dict:
         """The eval.yaml definition written into the attempt folder (host-only; no secret values)."""
@@ -370,6 +466,17 @@ class EvalRunner:
                 "verifier": spec.verifier_path,
                 "oracle": spec.oracle_path,
                 "graders": [g.type for g in spec.graders],
+                # The judge, so the receipt shows BOTH scorers. "judge" is the provider that will
+                # be used (key name only, never the key); null = no key found, judge skipped.
+                "llm_rubric": {
+                    "enabled": spec.run_llm_rubric,
+                    "judge": pick_provider(None, self.judge_env),
+                    "rubric_source": (
+                        "task's own" if any(g.type == "llm_rubric" for g in spec.graders)
+                        else "generated per task, cached in <output>/rubrics/ "
+                             "(fallback: built-in default)"
+                    ),
+                },
             },
             "timeout_sec": spec.timeout_sec,
             "adarubric_version": __version__,

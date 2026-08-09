@@ -173,10 +173,43 @@ def _run_record(run_json: Path, meta: dict) -> dict:
         "started_at": meta.get("started_at"),
         "ended_at": meta.get("ended_at"),
         "changes": _changes(trial_dir / "changes.json", meta),
+        # Per-grader breakdown (deterministic checks, skillbench verifier, llm rubric + the judge's
+        # reasoning) — so the page can show WHERE a reward came from, not just the blended number.
+        "graders": _graders(trial_dir / "grading.json"),
         "error": meta.get("error"),
         "output_dir": trial_dir.as_posix(),
         "log_excerpt": _log_tail(trial_dir / "raw.log"),
     }
+
+
+def _graders(grading_json: Path) -> list[dict]:
+    if not grading_json.is_file():
+        return []
+    try:
+        raw = json.loads(grading_json.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return []
+    out = []
+    for g in raw.get("grader_results") or []:
+        rec = {
+            "type": g.get("grader_type"),
+            "score": g.get("score"),
+            "weight": g.get("weight"),
+            "details": (g.get("details") or "")[:2000],
+            "error": g.get("error"),
+        }
+        # Adaptive rows carry their per-test verdicts as JSON in details — parse BEFORE the
+        # truncation above so the page can render each test (check, verdict, evidence) as a box.
+        if g.get("grader_type") == "adaptive_rubric":
+            try:
+                parsed = json.loads(g.get("details") or "")
+                rec["judge"] = parsed.get("judge")
+                rec["tests"] = parsed.get("tests") or []
+                rec["details"] = ""
+            except (ValueError, TypeError):
+                pass
+        out.append(rec)
+    return out
 
 
 def _running_record(output_root: str, t: dict) -> dict:
@@ -200,6 +233,7 @@ def _running_record(output_root: str, t: dict) -> dict:
         "started_at": t.get("started_at"),
         "ended_at": None,
         "changes": {"created": [], "modified": [], "deleted": [], "n_created": 0, "n_modified": 0, "n_deleted": 0},
+        "graders": [],
         "error": None, "output_dir": f"{output_root}/{key}", "log_excerpt": "",
         "activity": t.get("activity", []),
     }
