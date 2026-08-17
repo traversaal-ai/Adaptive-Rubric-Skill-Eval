@@ -10,7 +10,13 @@ from __future__ import annotations
 from adarubric.core.models import TranscriptEntry
 
 
-def build_transcript(entries: list[TranscriptEntry]) -> str:
+def build_transcript(
+    entries: list[TranscriptEntry],
+    prior_grader_types: tuple[str, ...] | None = None,
+) -> str:
+    """``prior_grader_types`` controls which earlier verdicts the judge may see:
+    ``None`` = all (legacy), a tuple = only those grader types, ``()`` = none (standalone).
+    skillgrade's judge saw the automated script checks only — never other LLM judges."""
     sections: list[str] = []
 
     instruction = next((e.instruction for e in entries if e.type == "run_start" and e.instruction), None)
@@ -31,7 +37,9 @@ def build_transcript(entries: list[TranscriptEntry]) -> str:
     if output:
         sections.append(f"## Agent Output\n{output}")
 
-    prior = [e.grader_result for e in entries if e.type == "grader" and e.grader_result]
+    prior = [e.grader_result for e in entries if e.type == "grader" and e.grader_result
+             and (prior_grader_types is None
+                  or e.grader_result.grader_type in prior_grader_types)]
     if prior:
         results = "\n".join(
             f"- {g.grader_type}: score={g.score:.2f} — {g.details}" for g in prior

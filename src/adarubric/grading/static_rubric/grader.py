@@ -28,6 +28,9 @@ class LlmRubricGrader(Grader):
     """LLM-as-judge against a static rubric (the task's own, or the built-in default)."""
 
     name = _TYPE
+    #: Which earlier verdicts this judge may see. True to skillgrade: the AUTOMATED script checks
+    #: only — never another LLM judge's opinion (judges echoing judges is noise, not evidence).
+    prior_grader_types: tuple[str, ...] = ("deterministic", "skillbench_verifier")
 
     def grade(
         self,
@@ -47,7 +50,7 @@ class LlmRubricGrader(Grader):
                 error="llm rubric needs a judge API key - none found in --env-file or the environment",
             )
         model = grader_spec.model or DEFAULT_MODELS.get(provider, "")
-        prompt = build_prompt(rubric, build_transcript(transcript))
+        prompt = build_prompt(rubric, build_transcript(transcript, self.prior_grader_types))
         try:
             reply = call_judge(provider, model, prompt, env)
         except JudgeError as e:
@@ -64,12 +67,13 @@ class LlmRubricGrader(Grader):
 
 
 class FixedRubricGrader(LlmRubricGrader):
-    """The FIXED-rubric judge: identical protocol to the static judge (one call, same prompt
-    shell, same inputs) — only the rubric text differs: the SAME words for every task
-    (rubrics/fixed.md, or the built-in default). It is the baseline rung of the comparison
-    ladder: fixed -> generated static -> adaptive. Weight 0 in the reward, like adaptive."""
+    """The FIXED-rubric judge: same one-call prompt shell as the static judge, but STANDALONE —
+    it sees no other scorer's verdict at all, and its rubric is the SAME text for every task
+    (rubrics/fixed.md, or the built-in default). The baseline rung of the comparison ladder:
+    fixed -> generated static -> adaptive. Weight 0 in the reward, like adaptive."""
 
     name = "fixed_rubric"
+    prior_grader_types: tuple[str, ...] = ()  # standalone: no verifier, no other judges
 
 
 def parse_judge_reply(text: str) -> tuple[float | None, str]:

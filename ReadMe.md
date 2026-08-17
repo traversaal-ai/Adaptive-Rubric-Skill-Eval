@@ -260,12 +260,13 @@ script checks (ground truth) → **fixed** (same rubric every task: the baseline
    AFTER the agent is gone. Score read from: `{"score": 0..1}` JSON → `REWARD SCORE: x` line →
    exit code (0=1, 1=0). Any other exit = **grading failed**, never a zero — a broken check must
    not read as a failing agent.
-2. **Fixed judge** — one call, IDENTICAL protocol to the static judge, but the rubric is the
-   same text for every task: `rubrics/fixed.md` (ours is written there if you have none — edit
-   freely, delete to restore).
+2. **Fixed judge** — one call, same prompt shell as the static judge, but **standalone**: it
+   sees no other scorer's verdict at all, and its rubric is the same text for every task:
+   `rubrics/fixed.md` (ours is written there if you have none — edit freely, delete to restore).
 3. **Static LLM judge** — one call; rubric = the task's own, else the generated
-   `rubrics/<task>/static.md`, else a built-in fallback. Sees the whole session including the
-   script verdicts (ported behaviour from skillgrade, prompt verbatim).
+   `rubrics/<task>/static.md`, else a built-in fallback. Sees the whole session plus the AUTOMATED
+   checks' verdicts — and only those, never another LLM judge's opinion (true to skillgrade,
+   prompt verbatim).
 4. **Adaptive rubric** — 4 generated tests (1 completeness, 2 skill-fidelity ×2 weight,
    1 process-quality with 3 levels), one blind judge call each, **evidence rule**: a pass must
    quote the proving line or it becomes a fail. Not blended into the reward until it beats static
