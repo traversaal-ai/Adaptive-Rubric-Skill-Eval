@@ -1,9 +1,10 @@
 # AdaRubric — Skill Eval
 
 Measures whether a coding agent **finds, reads, and actually follows** the skill you give it —
-and scores the result three ways: the task's own script checks, a static LLM judge, and an
-**adaptive rubric** (4 task-specific, evidence-checked tests — this project's research
-contribution, see [ADAPTIVE-RUBRIC.md](ADAPTIVE-RUBRIC.md)).
+and scores the result four ways: the task's own script checks, a **fixed** baseline judge (same
+rubric for every task), a **static** LLM judge (this task's rubric), and an **adaptive rubric**
+(4 task-specific, evidence-checked tests — this project's research contribution, see
+[ADAPTIVE-RUBRIC.md](ADAPTIVE-RUBRIC.md)).
 
 Runs real agents — Claude Code, Gemini CLI, Codex, or anything speaking ACP — in an isolated
 sandbox, on **your own tasks** or **[SkillsBench](https://github.com/benchflow-ai/skillsbench)**
@@ -54,7 +55,8 @@ One key is enough to start. Only the key an agent needs enters its sandbox; judg
 uv run adarubric run tasks/fix-logging --env-file .env
 ```
 
-You should see: `mode=generic`, both judges `on`, the agent working, then a reward.
+You should see: `mode=generic`, the judges `on` (fixed / static / adaptive), the agent
+working, then a reward.
 Runs locally in a temp folder — no Docker. The agent used is `claude-code` (the task's default);
 add `--harness gemini-cli` to use another.
 
@@ -64,8 +66,10 @@ add `--harness gemini-cli` to use another.
 python dashboard/serve.py           # http://127.0.0.1:8765
 ```
 
-Click any run → **Score breakdown** shows all three scorers, the adaptive tests with their
-quoted evidence, turns, cost, and whether the skill was opened.
+Click any run → **Score breakdown** shows all four scorers — script checks, the fixed baseline
+judge, the static judge, and the adaptive tests with their quoted evidence — plus turns, cost,
+and whether the skill was opened. The example task's README
+([tasks/fix-logging](tasks/fix-logging/README.md)) walks through what each scorer reads.
 
 ## Step 5 — Run a SkillsBench task
 

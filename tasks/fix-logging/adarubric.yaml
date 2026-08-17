@@ -49,3 +49,13 @@ graders:
   - type: llm_rubric
     rubric: prompts/quality.md
     weight: 0.3
+
+# Which LLM judges run (yes | no | a file path). The static judge already uses this task's own
+# rubric (prompts/quality.md, above). Two more judges score every run at weight 0, for comparison:
+#   fixed_rubric    — the BASELINE: one rubric, same words for every task in the repo. That file
+#                     is rubrics/fixed.md (ours by default — open it, edit it, it's yours).
+#   adaptive_rubric — 4 task-specific tests, generated on first run into
+#                     rubrics/fix-logging/adaptive.json, judged blind with quoted evidence.
+grading:
+  fixed_rubric: ../../rubrics/fixed.md
+  adaptive_rubric: yes

@@ -48,9 +48,17 @@ This task needs files in the workspace before the agent starts, and the plain
 
 `adarubric.yaml` is never copied into the workspace, so the agent can't read the grader.
 
-## The LLM judge
+## The LLM judges — this task shows all four scorers
 
-Besides the script check (weight 0.7), an LLM judge reads the whole session and scores it against
-[prompts/quality.md](prompts/quality.md) (weight 0.3) — workflow, naming, efficiency. It runs by
-default when a judge API key is in your `--env-file` (gemini picked first); turn it off with
-`--llm-rubric no`. The run page on the dashboard shows both scores and the judge's reasoning.
+A judge API key in your `--env-file` (gemini picked first) turns the LLM judges on; each has an
+off switch (`--fixed-rubric no`, `--llm-rubric no`, `--adaptive-rubric no`).
+
+| scorer | rubric it reads | weight |
+|---|---|---|
+| script check | the python one-liner in the yaml | 0.7 |
+| **fixed judge** — the baseline | [`../../rubrics/fixed.md`](../../rubrics/fixed.md) — same words for EVERY task; ours by default, edit it freely | 0 (shown only) |
+| static judge | this task's own [prompts/quality.md](prompts/quality.md) — workflow, naming, efficiency | 0.3 |
+| adaptive rubric | 4 task-specific tests, generated on first run into `rubrics/fix-logging/adaptive.json`, judged blind with quoted evidence | 0 (shown only) |
+
+The run page on the dashboard shows all four sections with each judge's score and reasoning.
+Comparing the fixed baseline against the task-specific judges on the same run is the whole point.
