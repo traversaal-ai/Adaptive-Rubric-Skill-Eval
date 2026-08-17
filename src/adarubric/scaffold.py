@@ -43,7 +43,6 @@ For each task:
 - Write a realistic instruction (what a user would ask the agent to do)
 - Define workspace files if needed (fixture files the agent works on)
 - Write a deterministic grader (shell script that outputs JSON to stdout)
-- Write an LLM rubric (criteria for the LLM judge)
 
 IMPORTANT GRADING RULES:
 - Deterministic graders MUST output JSON to stdout: {{"score": 0.0-1.0, "details": "...", "checks": [...]}}
@@ -105,11 +104,7 @@ tasks:
 
           score=$(awk "BEGIN {{printf \\"%.2f\\", $passed/$total}}")
           echo "{{\\"score\\":$score,\\"details\\":\\"$passed/$total checks passed\\",\\"checks\\":[{{\\"name\\":\\"check1\\",\\"passed\\":$c1_pass,\\"message\\":\\"$c1_msg\\"}},{{\\"name\\":\\"check2\\",\\"passed\\":$c2_pass,\\"message\\":\\"$c2_msg\\"}}]}}"
-        weight: 0.7
-      - type: llm_rubric
-        rubric: |
-          <evaluation criteria>
-        weight: 0.3"""
+        weight: 0.7"""
 
 TEMPLATE = """version: "1"
 
@@ -134,10 +129,14 @@ tasks:
           echo '{{"score": 0.0, "details": "TODO: implement grader"}}'
         weight: 0.7
 
-      - type: llm_rubric
-        rubric: |
-          TODO: Write evaluation criteria.
-        weight: 0.3
+# Run the control condition (skill withheld) by setting this to no; --inject-skills overrides.
+# inject_skills: no
+
+# Which LLM judges run (yes | no | a rubric file path). The yaml is the source of truth;
+# flags (--llm-rubric / --adaptive-rubric) override for a single run without editing it.
+grading:
+  static_rubric: yes
+  adaptive_rubric: yes
 """
 
 

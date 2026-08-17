@@ -366,6 +366,11 @@ class EvalSpec:
     run_adaptive_rubric: bool = True
     adaptive_provider: str | None = None  # --adaptive-provider (generator + judge)
     adaptive_model: str | None = None  # --adaptive-model
+    #: From the yaml's `grading:` block when a PATH was given instead of yes/no — the rubric text
+    #: (static) / criteria JSON (adaptive) read from that file at load time. None = no path given;
+    #: the runner then falls back to the rubrics/<task>/ cache or generates.
+    static_rubric_text: str | None = None
+    adaptive_criteria_json: str | None = None
 
     # Defaults a config file may carry (CLI flags override these; built-ins fill what's left).
     default_harness: str | None = None  # defaults.agent / defaults.harness in the yaml

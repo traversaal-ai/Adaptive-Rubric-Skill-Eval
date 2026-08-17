@@ -1,0 +1,38 @@
+{
+  "task": "fix-logging",
+  "generator": "gemini/gemini-3-flash-preview",
+  "criteria": [
+    {
+      "id": "completeness",
+      "dimension": "completeness",
+      "weight": 1,
+      "check": "Did the agent remove all `print()` statements from `orders.py` and ensure the command `python orders.py` executes without errors?",
+      "evidence_hint": "The final content of `orders.py` and the output of the `python orders.py` command in the session transcript."
+    },
+    {
+      "id": "fidelity_1",
+      "dimension": "skill_fidelity",
+      "weight": 2,
+      "check": "Does the code in `orders.py` use `applog.event()` with keyword arguments for data, adhering to the rule: \"Everything the reader might want goes in as a keyword \u2014 never glue values into a message string\"?",
+      "evidence_hint": "The `applog.event` calls in `orders.py` should look like `applog.event(\"name\", id=val)` rather than `applog.event(f\"name {val}\")`."
+    },
+    {
+      "id": "fidelity_2",
+      "dimension": "skill_fidelity",
+      "weight": 2,
+      "check": "Did the agent read the file `house-logging/references/naming.md` before naming the events in `orders.py`, as required by the skill: \"read it before you name anything\"?",
+      "evidence_hint": "A command like `cat`, `read`, or `grep` targeting `house-logging/references/naming.md` must appear in the transcript before the agent applies changes to `orders.py`."
+    },
+    {
+      "id": "process",
+      "dimension": "process_quality",
+      "weight": 1,
+      "check": "How efficiently did the agent clean the code and apply the logging skill?",
+      "levels": {
+        "1.0": "The agent reads `orders.py` and the naming guide, replaces all prints with `applog.event` using the correct keyword format in one pass, and verifies the script runs.",
+        "0.5": "The agent replaces prints but forgets to check the naming guide first (requiring a correction), or uses an inefficient discovery method like running the script repeatedly to find prints one by one.",
+        "0.0": "The agent flails, such as by using the standard Python `logging` module instead of `applog`, leaving `print()` statements in the code, or breaking the script's execution."
+      }
+    }
+  ]
+}

@@ -89,9 +89,13 @@ class EvalRunner:
         reporter: ProgressReporter | None = None,
         grade: bool = True,
         judge_env: dict[str, str] | None = None,
+        rubrics_root: str = "rubrics",
     ) -> None:
         self.sandbox = sandbox
         self.output_root = output_root
+        #: Root-level, user-editable home of generated rubrics: <rubrics_root>/<task>/{static.md,
+        #: adaptive.json}. Existing files win over regeneration — edits are law.
+        self.rubrics_root = rubrics_root
         self.reporter = reporter  # None → no live tracking; guarded at every emit
         self.grade = grade
         # Judge API keys (from --env-file), handed ONLY to the llm_rubric grader — which runs on the
@@ -300,7 +304,7 @@ class EvalRunner:
                                 rubric_source = "built-in default"
                             elif gs.auto:
                                 rubric_source = ("generated from the task's instruction + SKILL.md"
-                                                 " (cached in <output>/rubrics/)")
+                                                 " (cached in rubrics/<task>/)")
                             else:
                                 rubric_source = "task-defined"
                         try:
@@ -407,10 +411,13 @@ class EvalRunner:
         ):
             # Task has no rubric of its own (all of SkillsBench) → give it the same treatment
             # `init` gives user skills: an LLM writes one from the task's instruction + SKILL.md.
-            # Generated ONCE per task, cached in <output>/rubrics/, shared by every harness so
+            # Generated ONCE per task, cached in rubrics/<task>/, shared by every harness so
             # scores stay comparable. The task folder itself is never touched. If generation
             # can't run, the built-in DEFAULT_RUBRIC steps in (rubric=None → grader default).
-            rubric = generated_task_rubric(spec, env, self.output_root)
+            # A path in the yaml's grading block supplies the text directly; else the rubrics/
+            # cache (or a fresh generation) does.
+            rubric = spec.static_rubric_text or generated_task_rubric(
+                spec, env, self.rubrics_root, legacy_root=str(Path(self.output_root) / "rubrics"))
             specs.append(GraderSpec(
                 type="llm_rubric", rubric=rubric, weight=self._DEFAULT_LLM_WEIGHT, auto=True))
         # The ADAPTIVE rubric (step 8) — ordered LAST, after the static judge, so static's inputs
@@ -424,12 +431,17 @@ class EvalRunner:
             and not getattr(harness, "runs_oracle", False)
             and pick_provider(spec.adaptive_provider, env) is not None
         ):
-            criteria = generated_adaptive_rubric(
-                spec, env, self.output_root,
-                provider=spec.adaptive_provider, model=spec.adaptive_model)
-            if criteria is not None:
+            if spec.adaptive_criteria_json:
+                criteria_json: str | None = spec.adaptive_criteria_json
+            else:
+                criteria = generated_adaptive_rubric(
+                    spec, env, self.rubrics_root,
+                    provider=spec.adaptive_provider, model=spec.adaptive_model,
+                    legacy_root=str(Path(self.output_root) / "rubrics"))
+                criteria_json = json.dumps({"criteria": criteria}) if criteria is not None else None
+            if criteria_json is not None:
                 specs.append(GraderSpec(
-                    type="adaptive_rubric", rubric=json.dumps({"criteria": criteria}),
+                    type="adaptive_rubric", rubric=criteria_json,
                     provider=spec.adaptive_provider, model=spec.adaptive_model,
                     weight=0.0, auto=True))
         return specs
@@ -473,7 +485,7 @@ class EvalRunner:
                     "judge": pick_provider(None, self.judge_env),
                     "rubric_source": (
                         "task's own" if any(g.type == "llm_rubric" for g in spec.graders)
-                        else "generated per task, cached in <output>/rubrics/ "
+                        else "generated per task, cached in rubrics/<task>/ "
                              "(fallback: built-in default)"
                     ),
                 },

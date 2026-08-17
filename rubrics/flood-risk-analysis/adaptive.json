@@ -1,0 +1,38 @@
+{
+  "task": "flood-risk-analysis",
+  "generator": "gemini/gemini-3-flash-preview",
+  "criteria": [
+    {
+      "id": "completeness",
+      "dimension": "completeness",
+      "weight": 1,
+      "check": "Did the agent create a CSV file at /root/output/flood_results.csv containing exactly two columns: 'station_id' and 'flood_days', including only stations with at least one flood day for the period April 1-7, 2025?",
+      "evidence_hint": "Check the final file content of /root/output/flood_results.csv and the shell commands used to verify its existence."
+    },
+    {
+      "id": "fidelity_1",
+      "dimension": "skill_fidelity",
+      "weight": 2,
+      "check": "Did the agent aggregate instantaneous data to daily values using the maximum value as prescribed in the flood-detection skill: `daily_max = df[gage_col].resample('D').max()`?",
+      "evidence_hint": "Look for the Python script or notebook cells where the agent processes the USGS data and check for the .resample('D').max() method call."
+    },
+    {
+      "id": "fidelity_2",
+      "dimension": "skill_fidelity",
+      "weight": 2,
+      "check": "Did the agent handle the NWS CSV column mismatch by truncating data rows to 43 columns as prescribed in the nws-flood-thresholds skill: `data = [row[:43] for row in reader]`?",
+      "evidence_hint": "Examine the Python code used to download and parse the NWS bulk CSV from water.noaa.gov for the list comprehension or loop that slices the rows."
+    },
+    {
+      "id": "process",
+      "dimension": "process_quality",
+      "weight": 1,
+      "check": "Evaluate the efficiency and logic of the agent's workflow in combining the three skills.",
+      "levels": {
+        "1.0": "The agent read the station list, downloaded NWS thresholds with the truncation fix, fetched USGS instantaneous data (00065), aggregated to daily max, and saved the filtered results.",
+        "0.5": "The agent successfully produced the output but wasted time (e.g., trying to find daily gage height via get_dv() first despite the guide's warning, or manually looking up thresholds for each station).",
+        "0.0": "The agent failed to use the provided skills, used incorrect thresholds, or failed to produce a valid CSV after multiple failed attempts."
+      }
+    }
+  ]
+}

@@ -107,6 +107,30 @@ def _load_config(d: Path, cfg_path: Path, instruction: str | None, task: str | N
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
     defaults = raw.get("defaults") or {}
 
+    # A skillbench WRAPPER: `source:` points at a dataset task folder. The benchmark's own
+    # definition (instruction, data, verifier, oracle, Dockerfile, skills) comes from there —
+    # this yaml carries only the run/judging knobs. It must not redefine the task itself, or
+    # "SkillsBench results" would quietly stop being SkillsBench results.
+    source = raw.get("source")
+    if source:
+        for forbidden in ("instruction", "workspace", "tasks", "graders"):
+            if raw.get(forbidden):
+                raise ValueError(
+                    f"{cfg_path.name}: '{forbidden}:' is not allowed next to 'source:' — the "
+                    f"benchmark task defines that itself. Allowed: defaults, timeout, grading.")
+        src = (d / str(source)).resolve()
+        if not _is_skillsbench_task(src):
+            raise ValueError(f"{cfg_path.name}: source does not point at a SkillsBench task: {src}")
+        spec = _load_skillsbench_task(src, instruction)
+        spec.default_harness = defaults.get("agent") or defaults.get("harness")
+        spec.default_trials = _maybe_int(defaults.get("trials"))
+        timeout = raw.get("timeout") or defaults.get("timeout")
+        if timeout:
+            spec.timeout_sec = int(timeout)
+        _apply_inject_skills(spec, raw, defaults)
+        _apply_grading_switches(spec, raw, d)
+        return spec
+
     # defaults + tasks[] shape: pick the named task, else the first.
     task_def: dict = {}
     tasks = raw.get("tasks")
@@ -183,7 +207,72 @@ def _load_config(d: Path, cfg_path: Path, instruction: str | None, task: str | N
     )
     if timeout:
         spec.timeout_sec = int(timeout)
+    _apply_inject_skills(spec, raw, defaults, task_def)
+    _apply_grading_switches(spec, raw, d)
     return spec
+
+
+def _apply_inject_skills(spec: EvalSpec, raw: dict, defaults: dict, task_def: dict | None = None) -> None:
+    """``inject_skills: no`` in the yaml runs the task as the CONTROL condition (skill withheld).
+    Same value the --inject-skills flag sets; the flag, when passed, wins for that run."""
+    for holder in ((task_def or {}), raw, defaults):
+        value = holder.get("inject_skills")
+        if value is not None:
+            on, _ = _switch(value, Path("."))
+            spec.inject_skills = on
+            return
+
+
+def _apply_grading_switches(spec: EvalSpec, raw: dict, base: Path) -> None:
+    """The yaml's ``grading:`` block — the source of truth for which LLM judges run.
+
+    Each switch is yes/no (default yes = today's behaviour), OR a file path — which means "on,
+    and use exactly this file" (static: rubric text; adaptive: the 4-test criteria JSON). A path
+    that doesn't exist or doesn't validate is a load error, not a silent fallback: the user named
+    a file, so guessing instead would be lying about what judged the run.
+    """
+    grading = raw.get("grading") or {}
+    if not isinstance(grading, dict):
+        return
+
+    static = grading.get("static_rubric")
+    on, path = _switch(static, base)
+    spec.run_llm_rubric = on
+    if path is not None:
+        if not path.is_file():
+            raise ValueError(f"grading.static_rubric points at a missing file: {path}")
+        spec.static_rubric_text = path.read_text(encoding="utf-8")
+
+    adaptive = grading.get("adaptive_rubric")
+    on, path = _switch(adaptive, base)
+    spec.run_adaptive_rubric = on
+    if path is not None:
+        from adarubric.grading.adaptive_rubric.generate import _valid
+        if not path.is_file():
+            raise ValueError(f"grading.adaptive_rubric points at a missing file: {path}")
+        parsed = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        criteria = parsed.get("criteria") if isinstance(parsed, dict) else parsed
+        if not _valid(criteria):
+            raise ValueError(
+                f"grading.adaptive_rubric file {path} is not a valid 4-test criteria JSON "
+                f"(ids must be completeness, fidelity_1, fidelity_2, process).")
+        import json as _json
+        spec.adaptive_criteria_json = _json.dumps({"criteria": criteria})
+
+
+def _switch(value: object, base: Path) -> tuple[bool, Path | None]:
+    """(on?, explicit file path or None). Missing/None = on (default). Strings may be yes/no
+    words or a path; anything path-looking is treated as a path."""
+    if value is None:
+        return True, None
+    if isinstance(value, bool):
+        return value, None
+    text = str(value).strip()
+    if text.lower() in ("yes", "true", "1", "on"):
+        return True, None
+    if text.lower() in ("no", "false", "0", "off"):
+        return False, None
+    return True, (base / text).resolve()
 
 
 def _maybe_int(value: object) -> int | None:

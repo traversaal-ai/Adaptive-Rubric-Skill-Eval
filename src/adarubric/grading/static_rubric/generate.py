@@ -49,13 +49,21 @@ Respond with ONLY the rubric text. No preamble, no markdown fences."""
 
 
 def generated_task_rubric(
-    spec: EvalSpec, env: dict[str, str], output_root: str
+    spec: EvalSpec, env: dict[str, str], rubrics_root: str, legacy_root: str | None = None
 ) -> str | None:
     """The task-specific rubric: from the cache, else generated now. ``None`` = couldn't generate.
 
-    Cache: ``<output_root>/rubrics/<task>.md`` — shared by all harnesses and attempts of the task.
+    Cache: ``<rubrics_root>/<task>/static.md`` — a root-level, user-editable folder shared by all
+    harnesses and attempts of the task (an existing file is used AS-IS: edits win, nothing is
+    regenerated). ``legacy_root`` migrates pre-existing ``<output>/rubrics/<task>.md`` files in,
+    so old generations aren't re-bought.
     """
-    cache = Path(output_root) / "rubrics" / f"{_slug(spec.name)}.md"
+    cache = Path(rubrics_root) / _slug(spec.name) / "static.md"
+    if not cache.is_file() and legacy_root:
+        old = Path(legacy_root) / f"{_slug(spec.name)}.md"
+        if old.is_file():
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(old.read_text(encoding="utf-8"), encoding="utf-8")
     if cache.is_file():
         text = cache.read_text(encoding="utf-8").strip()
         if text:

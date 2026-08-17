@@ -31,7 +31,9 @@ _KEY_FOR = {
 #: The order a provider is auto-picked in when none is configured. Gemini first, like skillgrade.
 PROVIDER_ORDER = ("gemini", "anthropic", "openai")
 
-_TIMEOUT_S = 120
+#: Generous on purpose: judge calls carry whole session transcripts, and flash-class models can
+#: take minutes on a big one. A timeout here costs a whole verdict, so patience is cheaper.
+_TIMEOUT_S = 240
 
 
 class JudgeError(Exception):

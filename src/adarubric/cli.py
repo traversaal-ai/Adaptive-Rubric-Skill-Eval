@@ -90,7 +90,7 @@ def run(
         help="Run graders after the agent (skillbench verifier / config graders / llm rubric).",
     ),
     llm_rubric: str = typer.Option(
-        "yes", "--llm-rubric",
+        None, "--llm-rubric",
         help="Also have an LLM judge score the run against a rubric: yes (default) | no. Uses the "
         "task's own llm_rubric grader when it defines one, else a built-in general rubric at weight "
         "0.3. Needs a judge API key (GEMINI_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY, gemini "
@@ -98,9 +98,9 @@ def run(
         "per trial. Accepts yes/no, true/false, 1/0, on/off.",
     ),
     adaptive_rubric: str = typer.Option(
-        "yes", "--adaptive-rubric",
+        None, "--adaptive-rubric",
         help="Also score with the ADAPTIVE rubric: yes (default) | no. Four task-specific tests "
-        "generated from the instruction + SKILL.md (cached in <output>/rubrics/), judged blind, "
+        "generated from the instruction + SKILL.md (cached in rubrics/<task>/), judged blind, "
         "one small LLM call per test. Recorded and shown next to the other scores but weight 0 in "
         "the reward. Same key rule as --llm-rubric. Accepts yes/no, true/false, 1/0, on/off.",
     ),
@@ -114,11 +114,11 @@ def run(
         help="Model for the adaptive rubric's generator and judge (default: the provider's default).",
     ),
     inject_skills: str = typer.Option(
-        "yes", "--inject-skills",
-        help="Give the agent the task's skills: yes (default) | no. 'no' runs the SAME task with the "
-        "guidance withheld — the control half of 'did the skill actually help?'. Either way the run "
-        "records which skills existed, so the two conditions stay comparable. "
-        "Accepts yes/no, true/false, 1/0, on/off.",
+        None, "--inject-skills",
+        help="Give the agent the task's skills: yes | no. 'no' runs the SAME task with the "
+        "guidance withheld — the control half of 'did the skill actually help?'. Default: the "
+        "yaml's inject_skills (else yes); this flag overrides for one run. Either way the run "
+        "records which skills existed. Accepts yes/no, true/false, 1/0, on/off.",
     ),
     env_file: str = typer.Option(
         None, "--env-file", help="Load KEY=VALUE env vars (e.g. API keys) from a file."
@@ -186,9 +186,13 @@ def run(
     # Each entry is "name" or "name:model"; a per-harness model overrides the global --model.
     harness_specs = _parse_harness_specs(harness, model)
 
-    spec.inject_skills = _parse_bool_flag(inject_skills, "--inject-skills")
-    spec.run_llm_rubric = _parse_bool_flag(llm_rubric, "--llm-rubric")
-    spec.run_adaptive_rubric = _parse_bool_flag(adaptive_rubric, "--adaptive-rubric")
+    if inject_skills is not None:  # flag > yaml's inject_skills > default yes
+        spec.inject_skills = _parse_bool_flag(inject_skills, "--inject-skills")
+    # Judge switches: CLI flag (when passed) > the yaml's grading: block > default on.
+    if llm_rubric is not None:
+        spec.run_llm_rubric = _parse_bool_flag(llm_rubric, "--llm-rubric")
+    if adaptive_rubric is not None:
+        spec.run_adaptive_rubric = _parse_bool_flag(adaptive_rubric, "--adaptive-rubric")
     spec.adaptive_provider = adaptive_provider
     spec.adaptive_model = adaptive_model
     if not spec.inject_skills:
@@ -237,8 +241,12 @@ def run(
     judge_env = {k: v for k in judge_keys if (v := file_env.get(k) or os.environ.get(k))}
     if spec.run_llm_rubric:
         judge = pick_provider(None, judge_env)
-        rubric_src = ("the task's own" if any(g.type == "llm_rubric" for g in spec.graders)
-                      else f"generated per task (cached in {output}/rubrics/, fallback: built-in)")
+        if any(g.type == "llm_rubric" for g in spec.graders):
+            rubric_src = "the task's own grader"
+        elif spec.static_rubric_text:
+            rubric_src = "the file named in grading.static_rubric"
+        else:
+            rubric_src = "generated per task (rubrics/<task>/static.md, fallback: built-in)"
         if judge:
             typer.echo(f"llm rubric: on  judge={judge}  rubric={rubric_src}")
         else:
@@ -445,15 +453,25 @@ def check(
 
 @app.command()
 def init(
-    path: str = typer.Argument(".", help="Folder holding your SKILL.md (or skills/…)."),
-    force: bool = typer.Option(False, "--force", help="Overwrite an existing adarubric.yaml."),
+    path: str = typer.Argument(".", help="Your skill folder, OR a SkillsBench task folder."),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing generated files."),
+    static_rubric: str = typer.Option(
+        "yes", "--static-rubric",
+        help="Generate the static judge rubric: yes (default) | no. 'no' writes the switch off in "
+        "the yaml and spends nothing on it. Flip to yes later — the next run generates it."),
+    adaptive_rubric: str = typer.Option(
+        "yes", "--adaptive-rubric",
+        help="Generate the 4 adaptive tests: yes (default) | no. Same rules as --static-rubric."),
 ) -> None:
-    """Read your SKILL.md and write the task config (adarubric.yaml) for you.
+    """Write the task config (adarubric.yaml) — for your own skill OR a SkillsBench task.
 
-    With an API key (GEMINI_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY — gemini picked first,
-    from <path>/.env or your shell) an LLM writes the whole config: instruction, workspace files,
-    a deterministic grader, and the llm rubric. Without a key you get a commented template.
-    Either way: review and edit the file before running — it's a draft, not a verdict.
+    Your skill folder: an LLM reads SKILL.md and drafts the whole config (instruction, workspace,
+    a script grader, the llm rubric). Without a key you get a commented template.
+
+    A SkillsBench task: the dataset folder is NEVER written to. Instead you get a thin wrapper —
+    tasks/<name>/adarubric.yaml whose `source:` points at the dataset (verifier, Dockerfile, data
+    stay there) — plus the generated rubrics in rubrics/<name>/ for review. Edit, then
+    `adarubric run tasks/<name>`.
     """
     import os
     from pathlib import Path
@@ -467,10 +485,19 @@ def init(
         render_template,
     )
 
+    want_static = _parse_bool_flag(static_rubric, "--static-rubric")
+    want_adaptive = _parse_bool_flag(adaptive_rubric, "--adaptive-rubric")
+
     d = Path(path).expanduser().resolve()
     if not d.is_dir():
         typer.secho(f"Not a folder: {d}", fg="red")
         raise typer.Exit(code=1)
+
+    # ---- SkillsBench branch: wrapper in tasks/ + rubrics in rubrics/, dataset untouched. ----
+    if (d / "task.md").is_file() and (d / "environment").is_dir():
+        _init_skillbench(d, force=force, want_static=want_static, want_adaptive=want_adaptive)
+        return
+
     out_path = d / "adarubric.yaml"
     if out_path.exists() and not force:
         typer.secho("adarubric.yaml already exists. Use --force to overwrite.", fg="red")
@@ -498,13 +525,19 @@ def init(
 
     provider = pick_init_llm(env)
     if provider:
-        typer.echo(f"  generating the config with {provider} (it writes the llm rubric too)…")
+        typer.echo(f"  generating the config skeleton with {provider}…")
         try:
             content = generate_with_llm(skills, provider, env)
             out_path.write_text(content, encoding="utf-8")
             typer.secho(f"  created {out_path.name}", fg="green")
-            # Safety net skillgrade doesn't have: prove the generated file actually loads.
+            # Same treatment as skillbench init: rubrics generated per switches into rubrics/,
+            # referenced by path in the yaml — one behaviour, both task kinds.
             try:
+                spec = load_spec(str(out_path))
+                static_val, adaptive_val = _generate_rubrics(
+                    spec, env, d, want_static, want_adaptive)
+                out_path.write_text(
+                    content + _grading_block(static_val, adaptive_val), encoding="utf-8")
                 load_spec(str(out_path))
             except Exception as exc:  # noqa: BLE001
                 typer.secho(
@@ -525,6 +558,101 @@ def init(
         render_template(f"test-{name}", extract_instruction_hint(md)), encoding="utf-8")
     typer.echo(f"  Created {out_path.name}. Edit it to define your eval tasks, then run: "
                f"adarubric run {path}\n")
+
+
+def _generate_rubrics(spec, env: dict, ref_dir, want_static: bool, want_adaptive: bool):
+    """Generate the switched-on rubrics into rubrics/<task>/ and return the two switch values
+    to write in the yaml: a RELATIVE PATH when generated (so the yaml shows where it lives),
+    'yes' when generation must wait for the first run (no key), 'no' when switched off.
+    A 'no' spends nothing — the generator is never called for it."""
+    import os
+    from pathlib import Path
+
+    from adarubric.grading.adaptive_rubric import generated_adaptive_rubric
+    from adarubric.grading.static_rubric.generate import _slug, generated_task_rubric
+
+    rubrics_dir = Path("rubrics") / _slug(spec.name)
+
+    def rel(p) -> str:
+        return os.path.relpath(p, ref_dir).replace("\\", "/")
+
+    static_val, adaptive_val = "no", "no"
+    if want_static:
+        text = generated_task_rubric(spec, env, "rubrics")
+        static_val = rel(rubrics_dir / "static.md") if text else "yes"
+        typer.echo(f"  static rubric  -> rubrics/{_slug(spec.name)}/static.md" if text
+                   else "  static rubric: couldn't generate now (no key?) - first run will.")
+    if want_adaptive:
+        criteria = generated_adaptive_rubric(spec, env, "rubrics")
+        adaptive_val = rel(rubrics_dir / "adaptive.json") if criteria is not None else "yes"
+        typer.echo(f"  adaptive tests -> rubrics/{_slug(spec.name)}/adaptive.json"
+                   if criteria is not None
+                   else "  adaptive tests: couldn't generate now (no key?) - first run will.")
+    return static_val, adaptive_val
+
+
+def _grading_block(static_val: str, adaptive_val: str) -> str:
+    return (
+        "\n# Run the control condition (skill withheld) with `inject_skills: no`;"
+        "\n# --inject-skills overrides for one run."
+        "\n# inject_skills: no"
+        "\n"
+        "\n# Which LLM judges run (yes | no | a rubric file path). This yaml is the source of"
+        "\n# truth; --llm-rubric / --adaptive-rubric override for one run without editing it."
+        "\ngrading:"
+        f"\n  static_rubric: {static_val}"
+        f"\n  adaptive_rubric: {adaptive_val}\n")
+
+
+def _init_skillbench(task_dir, force: bool, want_static: bool, want_adaptive: bool) -> None:
+    """Manual mode for a benchmark task: wrapper yaml + reviewable rubrics, dataset untouched."""
+    import os
+    from pathlib import Path
+
+    from adarubric.loading import load_spec
+
+    name = task_dir.name
+    wrapper_dir = Path("tasks") / name
+    wrapper = wrapper_dir / "adarubric.yaml"
+    if wrapper.exists() and not force:
+        typer.secho(f"{wrapper} already exists. Use --force to overwrite.", fg="red")
+        raise typer.Exit(code=1)
+
+    typer.echo(f"\nadarubric init (SkillsBench task: {name})\n")
+    spec = load_spec(str(task_dir))
+
+    # Judge keys: .env in the CURRENT folder, then the shell (same rule as everywhere).
+    env = dict(os.environ)
+    if Path(".env").is_file():
+        for k, v in _load_env_file(".env").items():
+            env.setdefault(k, v)
+
+    # Generate ONLY what the switches ask for — a 'no' spends nothing.
+    static_val, adaptive_val = _generate_rubrics(spec, env, wrapper_dir, want_static, want_adaptive)
+
+    source_rel = os.path.relpath(task_dir, wrapper_dir).replace("\\", "/")
+    wrapper_dir.mkdir(parents=True, exist_ok=True)
+    wrapper.write_text(
+        f"# SkillsBench wrapper - generated by `adarubric init`. The benchmark task itself\n"
+        f"# (instruction, data, Dockerfile, verifier, skills) lives at `source:` and is never\n"
+        f"# copied or changed. This file holds only YOUR knobs: which judges run (yes | no |\n"
+        f"# a rubric file path), agent, trials, timeout. Flags still win for a single run.\n"
+        f"source: {source_rel}\n"
+        f"\n"
+        f"defaults:\n"
+        f"  # agent: gemini-cli        # uncomment to set a default agent for this task\n"
+        f"  trials: 1\n"
+        f"timeout: {spec.timeout_sec}\n"
+        + _grading_block(static_val, adaptive_val),
+        encoding="utf-8")
+    typer.secho(f"  created {wrapper}", fg="green")
+    try:
+        load_spec(str(wrapper_dir))
+    except Exception as exc:  # noqa: BLE001
+        typer.secho(f"  warning: wrapper doesn't load cleanly ({exc}).", fg="yellow")
+    typer.echo(
+        f"\n  Review/edit the rubrics, then run:\n"
+        f"    uv run adarubric run tasks/{name} --harness <agent> --sandbox docker --env-file .env\n")
 
 
 @app.command()

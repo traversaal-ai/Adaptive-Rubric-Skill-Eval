@@ -63,11 +63,16 @@ class AdaptiveRubricGrader(Grader):
             weight = float(c.get("weight", 1))
             try:
                 verdict = _judge_one(c, evidence, provider, model, env)
-            except JudgeError as e:
-                return GraderResult(
-                    _TYPE, 0.0, grader_spec.weight,
-                    json.dumps({"judge": f"{provider}/{model}", "tests": tests}),
-                    error=f"adaptive judge failed on '{c.get('id')}': {e}")
+            except JudgeError:
+                # One retry: judge APIs time out transiently, and losing all four verdicts to a
+                # single hiccup wastes the run's whole adaptive signal.
+                try:
+                    verdict = _judge_one(c, evidence, provider, model, env)
+                except JudgeError as e:
+                    return GraderResult(
+                        _TYPE, 0.0, grader_spec.weight,
+                        json.dumps({"judge": f"{provider}/{model}", "tests": tests}),
+                        error=f"adaptive judge failed on '{c.get('id')}' (after a retry): {e}")
             tests.append(verdict)
             earned += verdict["score"] * weight
             total += weight
@@ -141,32 +146,47 @@ def _parse_reply(text: str) -> dict:
 
 
 #: Extensions worth showing the judge the head of — text the agent produced. Binaries excluded.
-_TEXT_EXT = {".csv", ".txt", ".md", ".json", ".yaml", ".yml", ".py", ".js", ".html", ".xml", ".tsv"}
+#: (.obj/.mtl are text — Wavefront geometry; their absence cost a completeness verdict once.)
+_TEXT_EXT = {".csv", ".txt", ".md", ".json", ".yaml", ".yml", ".py", ".js", ".html", ".xml",
+             ".tsv", ".obj", ".mtl", ".toml", ".ini", ".cfg", ".log", ".sh", ".sql", ".r"}
 
 
 def _created_file_heads(
     workspace: str, sandbox: Sandbox, transcript: list[TranscriptEntry],
-    max_files: int = 6, head_bytes: int = 1500,
+    max_files: int = 6, head_bytes: int = 60000,
 ) -> list[tuple[str, str]]:
-    """(path, first bytes) of files the agent created — read from the LIVE workspace, so the judge
-    can verify contents (a CSV's header line) instead of failing 'no proof' on completeness.
+    """(path, contents) of files the agent created — read from the LIVE workspace, so the judge
+    can verify contents instead of failing 'no proof' on completeness.
+
+    The WHOLE file is shown (a 1500-byte peek once made the judge fail a perfectly valid .obj —
+    the face lines live past the start). Only genuinely huge files get a middle cut, and then the
+    judge is told explicitly what was cut, so "truncated" can never read as "invalid".
     Best-effort: unreadable files are simply skipped, never an error."""
     changed = next((e.output for e in transcript if e.type == "changes" and e.output), None)
     if not changed:
         return []
     try:
-        created = json.loads(changed).get("created") or []
+        parsed = json.loads(changed)
+        # Created AND modified: a fix-the-file task's whole answer lives in a MODIFIED file —
+        # showing only created files starved the judge on exactly the most common task shape.
+        paths = (parsed.get("created") or []) + (parsed.get("modified") or [])
     except ValueError:
         return []
     heads: list[tuple[str, str]] = []
-    for path in created:
+    for path in paths:
         if len(heads) >= max_files:
             break
         if Path(path).suffix.lower() not in _TEXT_EXT:
             continue
         text = ""
         try:
-            res = sandbox.run_command(workspace, f"head -c {head_bytes} '{path}' 2>/dev/null")
+            res = sandbox.run_command(
+                workspace,
+                # Whole file when it fits; head + explicit truncation marker + tail when huge.
+                f"if [ $(wc -c < '{path}') -le {head_bytes} ]; then cat '{path}'; "
+                f"else head -c {head_bytes // 2} '{path}'; "
+                f"echo; echo '[... middle truncated: file is' $(wc -c < '{path}') 'bytes total ...]'; "
+                f"tail -c {head_bytes // 4} '{path}'; fi 2>/dev/null")
             text = (res.stdout or "").strip()
         except Exception:  # noqa: BLE001 - evidence is best-effort, never fatal
             pass
@@ -180,9 +200,15 @@ def _created_file_heads(
                     p = base / rel
                     if p.is_file():
                         try:
-                            text = p.read_text(encoding="utf-8", errors="replace")[:head_bytes].strip()
+                            whole = p.read_text(encoding="utf-8", errors="replace")
                         except OSError:
-                            text = ""
+                            whole = ""
+                        if len(whole) <= head_bytes:
+                            text = whole.strip()
+                        else:
+                            text = (whole[: head_bytes // 2]
+                                    + f"\n[... middle truncated: file is {len(whole)} chars total ...]\n"
+                                    + whole[-head_bytes // 4:]).strip()
                         break
                 if text:
                     break

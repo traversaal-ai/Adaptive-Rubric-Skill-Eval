@@ -1,0 +1,38 @@
+{
+  "task": "threejs-to-obj",
+  "generator": "gemini/gemini-3-flash-preview",
+  "criteria": [
+    {
+      "id": "completeness",
+      "dimension": "completeness",
+      "weight": 1,
+      "check": "Did the agent produce the file /root/output/object.obj containing valid Wavefront OBJ data (vertex 'v' and face 'f' definitions) as requested in the instruction?",
+      "evidence_hint": "Look for a command creating or writing to /root/output/object.obj and a subsequent 'cat' or file check showing OBJ content."
+    },
+    {
+      "id": "fidelity_1",
+      "dimension": "skill_fidelity",
+      "weight": 2,
+      "check": "Did the agent call 'updateMatrixWorld(true)' on the Three.js object/scene before exporting, as prescribed in the 'Exporting with World Transforms' section of the obj-exporter skill guide?",
+      "evidence_hint": "Check the JavaScript code written by the agent for the specific method call: .updateMatrixWorld(true)."
+    },
+    {
+      "id": "fidelity_2",
+      "dimension": "skill_fidelity",
+      "weight": 2,
+      "check": "Did the agent apply the axis conversion using a THREE.Matrix4 with 'makeRotationX(-Math.PI / 2)' to the geometry or mesh, as prescribed in the 'Axis conversion (Y-up to Z-up)' section of the threejs skill guide?",
+      "evidence_hint": "Check the JavaScript code for the creation of a Matrix4, the call to .makeRotationX(-Math.PI / 2) (or -1.57...), and its application via .applyMatrix4()."
+    },
+    {
+      "id": "process",
+      "dimension": "process_quality",
+      "weight": 1,
+      "check": "Did the agent follow a logical path to export the object using the prescribed tools?",
+      "levels": {
+        "1.0": "The agent identifies the input, creates a Node.js script (handling ES modules via package.json or .mjs), imports OBJExporter, applies the required matrix transforms (world update and Z-up rotation), and runs it to produce the output.",
+        "0.5": "The agent produces the file but wanders, such as initially failing to handle Node.js ES module imports, forgetting the world transform update until a second attempt, or needing to iterate on the rotation logic.",
+        "0.0": "The agent fails to produce a valid OBJ file, flails with environment setup without resolution, or ignores the skill guide's specific transformation requirements (like the X-rotation matrix)."
+      }
+    }
+  ]
+}

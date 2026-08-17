@@ -31,15 +31,24 @@ _EXCLUDED_DIRS = {"verifier", "oracle", ".git", "__pycache__", "node_modules"}
 def generated_adaptive_rubric(
     spec: EvalSpec,
     env: dict[str, str],
-    output_root: str,
+    rubrics_root: str,
     provider: str | None = None,
     model: str | None = None,
+    legacy_root: str | None = None,
 ) -> list[dict] | None:
     """This task's four tests: from the cache, else generated now. ``None`` = couldn't generate
     (no key, API down, or the LLM's JSON never validated) — the caller then SKIPS adaptive
     scoring; there is deliberately no generic fallback, an adaptive rubric is task-specific or
-    it is nothing."""
-    cache = Path(output_root) / "rubrics" / f"{_slug(spec.name)}.adaptive.json"
+    it is nothing.
+
+    Cache: ``<rubrics_root>/<task>/adaptive.json`` — root-level and user-editable; an existing
+    file is used as-is. ``legacy_root`` migrates old ``<output>/rubrics/*.adaptive.json`` in."""
+    cache = Path(rubrics_root) / _slug(spec.name) / "adaptive.json"
+    if not cache.is_file() and legacy_root:
+        old = Path(legacy_root) / f"{_slug(spec.name)}.adaptive.json"
+        if old.is_file():
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(old.read_text(encoding="utf-8"), encoding="utf-8")
     if cache.is_file():
         try:
             criteria = json.loads(cache.read_text(encoding="utf-8"))["criteria"]
