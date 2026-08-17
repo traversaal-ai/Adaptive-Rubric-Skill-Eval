@@ -190,6 +190,7 @@ uv run adarubric run tasks/my-task --harness claude-code,gemini-cli,codex --tria
 |---|---|---|
 | `tasks/` | you (or `init` drafts) | task definitions: yaml, skill, starting files, checks |
 | `rubrics/<task>/` | generated, **you may edit** | `static.md` + `adaptive.json`. An existing file is used AS-IS, never regenerated. Delete it to regenerate. |
+| `rubrics/fixed.md` | ours by default, **yours to edit** | the ONE fixed rubric judging every task with the same words — the baseline judge. Delete to restore our default. |
 | `output/` | AdaRubric | per run: `eval.yaml` receipt, `run.json`, `grading.json`, `rubric.md`, `transcript.json`, `changes.json`, `raw.log`, `workspace/` |
 | `dataset/` | SkillsBench | never written to |
 
@@ -216,6 +217,7 @@ graders:                       # your script checks (0..n of them)
     run: python graders/check.py
     weight: 0.7
 grading:                       # THE SOURCE OF TRUTH for the LLM judges
+  fixed_rubric: yes            # the baseline judge: same text every task (rubrics/fixed.md)
   static_rubric: yes           # yes | no | a file path (= on, use exactly that file)
   adaptive_rubric: yes         # same. Lines left out = yes. Flags override for one run.
 source: ../../dataset/...     # SkillsBench wrapper ONLY — task comes from there; combining
@@ -241,18 +243,26 @@ yaml, or run the SKILL.md path directly.
 5. Never edit `dataset/`; never put `instruction:`/`workspace:` in a `source:` wrapper.
 6. Never commit `.env`. A key pasted anywhere public is burned — rotate it.
 
-## Scoring — the three scorers
+## Scoring — the four scorers
 
-**Reward = script checks + static judge (0.3), weighted. Adaptive is shown but weight 0.**
+**Reward = script checks + static judge (0.3), weighted. Fixed and adaptive are shown, weight 0.**
+
+The four form a ladder — each rung isolates one question:
+script checks (ground truth) → **fixed** (same rubric every task: the baseline) →
+**static** (task-specific rubric, same protocol: does specific text help?) →
+**adaptive** (task-specific tests, blind + evidence: does the strict protocol help?).
 
 1. **Script checks** (deterministic / SkillsBench verifier) — run in the finished workspace,
    AFTER the agent is gone. Score read from: `{"score": 0..1}` JSON → `REWARD SCORE: x` line →
    exit code (0=1, 1=0). Any other exit = **grading failed**, never a zero — a broken check must
    not read as a failing agent.
-2. **Static LLM judge** — one call; rubric = the task's own, else the generated
+2. **Fixed judge** — one call, IDENTICAL protocol to the static judge, but the rubric is the
+   same text for every task: `rubrics/fixed.md` (ours is written there if you have none — edit
+   freely, delete to restore).
+3. **Static LLM judge** — one call; rubric = the task's own, else the generated
    `rubrics/<task>/static.md`, else a built-in fallback. Sees the whole session including the
    script verdicts (ported behaviour from skillgrade, prompt verbatim).
-3. **Adaptive rubric** — 4 generated tests (1 completeness, 2 skill-fidelity ×2 weight,
+4. **Adaptive rubric** — 4 generated tests (1 completeness, 2 skill-fidelity ×2 weight,
    1 process-quality with 3 levels), one blind judge call each, **evidence rule**: a pass must
    quote the proving line or it becomes a fail. Not blended into the reward until it beats static
    on correlation / separation / stability ([converting/step-8](converting/step-8-adaptive-rubric.md)).
@@ -278,6 +288,7 @@ So the yaml is how a task normally runs; a flag is "just this once, do it differ
 | `--model` | the agent's own choice | Force one model for every agent in this run. |
 | `--inject-skills` | yaml, else yes | `no` = run WITHOUT giving the agent the skill — the control condition. The reward gap vs a normal run is what the skill is worth. |
 | `--llm-rubric` | yaml, else yes | `no` = skip the static LLM judge this run. |
+| `--fixed-rubric` | yaml, else yes | `no` = skip the fixed baseline judge this run. |
 | `--adaptive-rubric` | yaml, else yes | `no` = skip the adaptive rubric this run. |
 | `--adaptive-provider` | first key found | Which LLM judges/generates the adaptive rubric: `gemini`, `anthropic`, `openai`. |
 | `--adaptive-model` | provider's default | Exact model for the adaptive rubric. |

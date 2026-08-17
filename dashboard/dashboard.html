@@ -572,6 +572,7 @@
     deterministic: "Script check",
     skillbench_verifier: "Benchmark tests",
     llm_rubric: "LLM judge",
+    fixed_rubric: "Fixed judge",
     adaptive_rubric: "Adaptive rubric",
   };
   function graderRow(g) {
@@ -582,7 +583,7 @@
     const note = g.error != null
       ? `This check broke (${esc(g.error)}) — it does not count toward the reward and is not the agent's fault.`
       : esc(g.details || "");
-    const w = g.type === "adaptive_rubric"
+    const w = (g.type === "adaptive_rubric" || g.type === "fixed_rubric")
       ? `<span class="dim" title="recorded and shown, but not blended into the reward yet">×0 (comparison only)</span>`
       : `<span class="dim">×${g.weight}</span>`;
     return `<div class="fact"><span class="fk">${esc(label)} ${w}</span>` +
@@ -610,14 +611,15 @@
     if (!gs.length) return `<div class="none">No checks ran for this run.</div>`;
     const sections = [
       ["Script checks — objective, run in the workspace", gs.filter((g) => g.type === "deterministic" || g.type === "skillbench_verifier")],
-      ["Static LLM rubric — one rubric, whole session, one call", gs.filter((g) => g.type === "llm_rubric")],
+      ["Fixed rubric — the SAME words for every task (the baseline judge)", gs.filter((g) => g.type === "fixed_rubric")],
+      ["Static LLM rubric — this task's rubric, whole session, one call", gs.filter((g) => g.type === "llm_rubric")],
       ["Adaptive rubric — 4 generated tests, judged blind with quoted evidence", gs.filter((g) => g.type === "adaptive_rubric")],
     ];
     const html = sections.map(([title, rows]) => rows.length
       ? `<div style="margin-top:10px"><div class="dim" style="margin-bottom:4px"><b>${title}</b></div><div class="facts">${rows.map(graderRow).join("")}</div></div>`
       : "").join("");
     const hint = r.graded
-      ? `<div class="none" style="padding-top:8px">Reward ${fmtReward(r.reward)} = the weighted mix of the script checks and the static rubric. The adaptive rubric is shown for comparison and does not move the reward yet.</div>`
+      ? `<div class="none" style="padding-top:8px">Reward ${fmtReward(r.reward)} = the weighted mix of the script checks and the static rubric. The fixed and adaptive rubrics are shown for comparison and do not move the reward.</div>`
       : "";
     return `${html}${hint}`;
   }

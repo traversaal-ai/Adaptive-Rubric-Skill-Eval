@@ -114,5 +114,22 @@ def _complete(provider: str, model: str, prompt: str, env: dict[str, str]) -> st
     return data["choices"][0]["message"]["content"]
 
 
+def ensure_fixed_rubric(rubrics_root: str) -> str:
+    """The ONE fixed rubric judging every task: <rubrics_root>/fixed.md. Created from the
+    built-in default if the user hasn't written one — the text judging runs is always a
+    visible, editable file. Returns the text."""
+    from adarubric.grading.static_rubric.prompt import DEFAULT_RUBRIC
+
+    path = Path(rubrics_root) / "fixed.md"
+    if not path.is_file():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "<!-- The FIXED rubric: judges EVERY task with these same words (the baseline\n"
+            "     next to the generated static and adaptive rubrics). Edit freely - your\n"
+            "     text is used as-is. Delete the file to restore this default. -->\n\n"
+            + DEFAULT_RUBRIC, encoding="utf-8")
+    return path.read_text(encoding="utf-8")
+
+
 def _slug(name: str) -> str:
     return re.sub(r"[^\w.-]+", "-", name).strip("-") or "task"

@@ -364,6 +364,11 @@ class EvalSpec:
     #: SKILL.md, judged blind, one call per test. Recorded and displayed but weight 0 in the reward
     #: until it proves itself against static. ``--adaptive-rubric no`` turns it off.
     run_adaptive_rubric: bool = True
+    #: The FIXED-rubric judge — same rubric text for every task (rubrics/fixed.md, else the
+    #: built-in). The baseline rung of the ladder: fixed -> generated static -> adaptive.
+    #: Weight 0 in the reward. ``--fixed-rubric no`` / grading.fixed_rubric turn it off.
+    run_fixed_rubric: bool = True
+    fixed_rubric_text: str | None = None  # from a grading.fixed_rubric PATH, read at load time
     adaptive_provider: str | None = None  # --adaptive-provider (generator + judge)
     adaptive_model: str | None = None  # --adaptive-model
     #: From the yaml's `grading:` block when a PATH was given instead of yes/no — the rubric text

@@ -97,6 +97,13 @@ def run(
         "picked first) — with no key the default judge is skipped quietly. Costs a small LLM call "
         "per trial. Accepts yes/no, true/false, 1/0, on/off.",
     ),
+    fixed_rubric: str = typer.Option(
+        None, "--fixed-rubric",
+        help="Also score with the FIXED rubric - the SAME rubric text for every task "
+        "(rubrics/fixed.md, ours written there if you have none): yes | no. The baseline next to "
+        "the generated static and adaptive rubrics; weight 0 in the reward. Default: the yaml's "
+        "grading.fixed_rubric, else yes.",
+    ),
     adaptive_rubric: str = typer.Option(
         None, "--adaptive-rubric",
         help="Also score with the ADAPTIVE rubric: yes (default) | no. Four task-specific tests "
@@ -193,6 +200,8 @@ def run(
         spec.run_llm_rubric = _parse_bool_flag(llm_rubric, "--llm-rubric")
     if adaptive_rubric is not None:
         spec.run_adaptive_rubric = _parse_bool_flag(adaptive_rubric, "--adaptive-rubric")
+    if fixed_rubric is not None:
+        spec.run_fixed_rubric = _parse_bool_flag(fixed_rubric, "--fixed-rubric")
     spec.adaptive_provider = adaptive_provider
     spec.adaptive_model = adaptive_model
     if not spec.inject_skills:
@@ -256,6 +265,8 @@ def run(
             )
     else:
         typer.echo("llm rubric: off (--llm-rubric no)")
+    if spec.run_fixed_rubric and pick_provider(None, judge_env):
+        typer.echo("fixed rubric: on  (same text for every task - rubrics/fixed.md, weight 0)")
     if spec.run_adaptive_rubric:
         a_judge = pick_provider(adaptive_provider, judge_env)
         if a_judge:
@@ -534,10 +545,11 @@ def init(
             # referenced by path in the yaml — one behaviour, both task kinds.
             try:
                 spec = load_spec(str(out_path))
-                static_val, adaptive_val = _generate_rubrics(
+                static_val, adaptive_val, fixed_val = _generate_rubrics(
                     spec, env, d, want_static, want_adaptive)
                 out_path.write_text(
-                    content + _grading_block(static_val, adaptive_val), encoding="utf-8")
+                    content + _grading_block(static_val, adaptive_val, fixed_val),
+                    encoding="utf-8")
                 load_spec(str(out_path))
             except Exception as exc:  # noqa: BLE001
                 typer.secho(
@@ -569,12 +581,19 @@ def _generate_rubrics(spec, env: dict, ref_dir, want_static: bool, want_adaptive
     from pathlib import Path
 
     from adarubric.grading.adaptive_rubric import generated_adaptive_rubric
-    from adarubric.grading.static_rubric.generate import _slug, generated_task_rubric
+    from adarubric.grading.static_rubric.generate import (
+        _slug,
+        ensure_fixed_rubric,
+        generated_task_rubric,
+    )
 
     rubrics_dir = Path("rubrics") / _slug(spec.name)
 
     def rel(p) -> str:
         return os.path.relpath(p, ref_dir).replace("\\", "/")
+
+    # The fixed rubric always exists after init, so the yaml can hint straight at it.
+    ensure_fixed_rubric("rubrics")
 
     static_val, adaptive_val = "no", "no"
     if want_static:
@@ -588,18 +607,20 @@ def _generate_rubrics(spec, env: dict, ref_dir, want_static: bool, want_adaptive
         typer.echo(f"  adaptive tests -> rubrics/{_slug(spec.name)}/adaptive.json"
                    if criteria is not None
                    else "  adaptive tests: couldn't generate now (no key?) - first run will.")
-    return static_val, adaptive_val
+    fixed_val = rel(Path("rubrics") / "fixed.md")
+    return static_val, adaptive_val, fixed_val
 
 
-def _grading_block(static_val: str, adaptive_val: str) -> str:
+def _grading_block(static_val: str, adaptive_val: str, fixed_val: str = "yes") -> str:
     return (
         "\n# Run the control condition (skill withheld) with `inject_skills: no`;"
         "\n# --inject-skills overrides for one run."
         "\n# inject_skills: no"
         "\n"
         "\n# Which LLM judges run (yes | no | a rubric file path). This yaml is the source of"
-        "\n# truth; --llm-rubric / --adaptive-rubric override for one run without editing it."
+        "\n# truth; flags (--fixed-rubric / --llm-rubric / --adaptive-rubric) override for one run."
         "\ngrading:"
+        f"\n  fixed_rubric: {fixed_val}"
         f"\n  static_rubric: {static_val}"
         f"\n  adaptive_rubric: {adaptive_val}\n")
 
@@ -628,7 +649,8 @@ def _init_skillbench(task_dir, force: bool, want_static: bool, want_adaptive: bo
             env.setdefault(k, v)
 
     # Generate ONLY what the switches ask for — a 'no' spends nothing.
-    static_val, adaptive_val = _generate_rubrics(spec, env, wrapper_dir, want_static, want_adaptive)
+    static_val, adaptive_val, fixed_val = _generate_rubrics(
+        spec, env, wrapper_dir, want_static, want_adaptive)
 
     source_rel = os.path.relpath(task_dir, wrapper_dir).replace("\\", "/")
     wrapper_dir.mkdir(parents=True, exist_ok=True)
@@ -643,7 +665,7 @@ def _init_skillbench(task_dir, force: bool, want_static: bool, want_adaptive: bo
         f"  # agent: gemini-cli        # uncomment to set a default agent for this task\n"
         f"  trials: 1\n"
         f"timeout: {spec.timeout_sec}\n"
-        + _grading_block(static_val, adaptive_val),
+        + _grading_block(static_val, adaptive_val, fixed_val),
         encoding="utf-8")
     typer.secho(f"  created {wrapper}", fg="green")
     try:

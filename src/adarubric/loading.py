@@ -235,6 +235,14 @@ def _apply_grading_switches(spec: EvalSpec, raw: dict, base: Path) -> None:
     if not isinstance(grading, dict):
         return
 
+    fixed = grading.get("fixed_rubric")
+    on, path = _switch(fixed, base)
+    spec.run_fixed_rubric = on
+    if path is not None:
+        if not path.is_file():
+            raise ValueError(f"grading.fixed_rubric points at a missing file: {path}")
+        spec.fixed_rubric_text = path.read_text(encoding="utf-8")
+
     static = grading.get("static_rubric")
     on, path = _switch(static, base)
     spec.run_llm_rubric = on

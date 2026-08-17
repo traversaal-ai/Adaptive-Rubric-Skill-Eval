@@ -42,7 +42,7 @@ class LlmRubricGrader(Grader):
         provider = pick_provider(grader_spec.provider, env)
         if provider is None:
             return GraderResult(
-                _TYPE, 0.0, grader_spec.weight,
+                self.name, 0.0, grader_spec.weight,
                 "no judge API key found (GEMINI_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY)",
                 error="llm rubric needs a judge API key - none found in --env-file or the environment",
             )
@@ -51,16 +51,25 @@ class LlmRubricGrader(Grader):
         try:
             reply = call_judge(provider, model, prompt, env)
         except JudgeError as e:
-            return GraderResult(_TYPE, 0.0, grader_spec.weight, str(e), error=str(e))
+            return GraderResult(self.name, 0.0, grader_spec.weight, str(e), error=str(e))
         score, reasoning = parse_judge_reply(reply)
         detail_prefix = f"judge: {provider}/{model}\n"
         if score is None:
             return GraderResult(
-                _TYPE, 0.0, grader_spec.weight,
+                self.name, 0.0, grader_spec.weight,
                 f"{detail_prefix}unreadable judge reply: {reply[:200]}",
                 error="the judge replied but no score could be read from its answer",
             )
-        return GraderResult(_TYPE, score, grader_spec.weight, detail_prefix + reasoning)
+        return GraderResult(self.name, score, grader_spec.weight, detail_prefix + reasoning)
+
+
+class FixedRubricGrader(LlmRubricGrader):
+    """The FIXED-rubric judge: identical protocol to the static judge (one call, same prompt
+    shell, same inputs) — only the rubric text differs: the SAME words for every task
+    (rubrics/fixed.md, or the built-in default). It is the baseline rung of the comparison
+    ladder: fixed -> generated static -> adaptive. Weight 0 in the reward, like adaptive."""
+
+    name = "fixed_rubric"
 
 
 def parse_judge_reply(text: str) -> tuple[float | None, str]:

@@ -11,12 +11,13 @@ from typing import Callable
 from adarubric.core.contracts import Grader
 from adarubric.grading.adaptive_rubric import AdaptiveRubricGrader
 from adarubric.grading.deterministic import DeterministicGrader, SkillsBenchVerifier
-from adarubric.grading.static_rubric import LlmRubricGrader
+from adarubric.grading.static_rubric.grader import FixedRubricGrader, LlmRubricGrader
 
 _REGISTRY: dict[str, Callable[[], Grader]] = {
     "deterministic": DeterministicGrader,
     "skillbench_verifier": SkillsBenchVerifier,
     "llm_rubric": LlmRubricGrader,
+    "fixed_rubric": FixedRubricGrader,
     "adaptive_rubric": AdaptiveRubricGrader,
 }
 

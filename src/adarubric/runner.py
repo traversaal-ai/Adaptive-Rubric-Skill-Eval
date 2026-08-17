@@ -57,7 +57,7 @@ from adarubric.core.skill_depth import classify as classify_skill_depth
 from adarubric.grading import create_grader
 from adarubric.grading.adaptive_rubric import generated_adaptive_rubric
 from adarubric.grading.static_rubric import DEFAULT_RUBRIC, pick_provider
-from adarubric.grading.static_rubric.generate import generated_task_rubric
+from adarubric.grading.static_rubric.generate import ensure_fixed_rubric, generated_task_rubric
 from adarubric.harnesses.oracle import ORACLE_DIR
 
 
@@ -293,9 +293,11 @@ class EvalRunner:
                 if self.grade and specs:
                     self._emit("stage_changed", harness.name, _safe(spec.name), attempt, TrialStage.GRADING, trial=trial_id)
                     for gs in specs:
-                        # The judge's keys go to the llm grader only (it calls out from the host);
-                        # deterministic checks run inside the sandbox and must not see them.
-                        genv = {**run_env, **self.judge_env} if gs.type == "llm_rubric" else run_env
+                        # The judge's keys go to the JUDGE graders only (they call out from the
+                        # host); deterministic checks run inside the sandbox and must not see them.
+                        genv = ({**run_env, **self.judge_env}
+                                if gs.type in ("llm_rubric", "fixed_rubric", "adaptive_rubric")
+                                else run_env)
                         if gs.type == "llm_rubric":
                             # The EXACT rubric text the judge scored against, kept with the trial —
                             # a judge score without its rubric can't be audited or reproduced.
@@ -403,6 +405,18 @@ class EvalRunner:
             specs = [GraderSpec(type="skillbench_verifier", weight=1.0)]
         else:
             specs = list(spec.graders)
+        # The FIXED-rubric judge — the baseline rung: SAME rubric text for every task, same
+        # protocol as the static judge, weight 0. Ordered before static so the ladder reads
+        # fixed -> generated static -> adaptive on every run.
+        if (
+            spec.run_fixed_rubric
+            and not getattr(harness, "runs_oracle", False)
+            and not any(g.type == "fixed_rubric" for g in specs)
+            and pick_provider(None, env) is not None
+        ):
+            specs.append(GraderSpec(
+                type="fixed_rubric", rubric=spec.fixed_rubric_text or self._fixed_rubric_text(),
+                weight=0.0, auto=True))
         if (
             spec.run_llm_rubric
             and not getattr(harness, "runs_oracle", False)
@@ -445,6 +459,20 @@ class EvalRunner:
                     provider=spec.adaptive_provider, model=spec.adaptive_model,
                     weight=0.0, auto=True))
         return specs
+
+    def _fixed_rubric_text(self) -> str:
+        """The one fixed rubric used for EVERY task: rubrics/fixed.md. If the user hasn't written
+        one, the built-in default is written there first — so the text judging their runs is
+        always a visible, editable file, never something hidden in the code."""
+        path = Path(self.rubrics_root) / "fixed.md"
+        if not path.is_file():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                "<!-- The FIXED rubric: judges EVERY task with these same words (the baseline\n"
+                "     next to the generated static and adaptive rubrics). Edit freely - your\n"
+                "     text is used as-is. Delete the file to restore this default. -->\n\n"
+                + DEFAULT_RUBRIC, encoding="utf-8")
+        return path.read_text(encoding="utf-8")
 
     def _manifest(self, spec: EvalSpec, harness: Harness) -> dict:
         """The eval.yaml definition written into the attempt folder (host-only; no secret values)."""
