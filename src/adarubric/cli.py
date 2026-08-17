@@ -655,6 +655,98 @@ def _init_skillbench(task_dir, force: bool, want_static: bool, want_adaptive: bo
         f"    uv run adarubric run tasks/{name} --harness <agent> --sandbox docker --env-file .env\n")
 
 
+#: batch.yaml keys that map 1:1 onto `adarubric run` flags (underscores become dashes).
+_BATCH_FLAG_KEYS = (
+    "harness", "sandbox", "model", "dataset", "instruction", "task", "output", "trials",
+    "timeout", "inject_skills", "llm_rubric", "adaptive_rubric", "adaptive_provider",
+    "adaptive_model", "env_file",
+)
+
+
+def batch_commands(cfg: dict) -> list[tuple[str, list[str]]]:
+    """(task path, run-args) per task from a batch file. Pure — unit-tested without subprocesses.
+
+    Each task entry: ``path`` (required) + any run flag as a key (task overrides ``defaults``) +
+    an optional raw ``flags: [...]`` list appended verbatim for anything exotic (ACP flags etc.).
+    """
+    defaults = cfg.get("defaults") or {}
+    jobs: list[tuple[str, list[str]]] = []
+    for i, t in enumerate(cfg.get("tasks") or [], start=1):
+        if not isinstance(t, dict) or not t.get("path"):
+            raise ValueError(f"batch task #{i} needs a `path:`")
+        merged = {**defaults, **t}
+        args = ["run", str(merged["path"])]
+        for key in _BATCH_FLAG_KEYS:
+            value = merged.get(key)
+            if value is not None:
+                # yaml reads bare yes/no as booleans — hand the flag the words it expects.
+                text = ("yes" if value else "no") if isinstance(value, bool) else str(value)
+                args += [f"--{key.replace('_', '-')}", text]
+        args += [str(x) for x in (merged.get("flags") or [])]
+        jobs.append((str(merged["path"]), args))
+    return jobs
+
+
+@app.command()
+def batch(
+    file: str = typer.Argument(..., help="A batch yaml: defaults + tasks[] (see batch.example.yaml)."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print the commands that WOULD run, run nothing, spend nothing."),
+) -> None:
+    """Run many tasks one by one from a single yaml file.
+
+    Define your tasks once (each with its own harness/sandbox/trials/... if needed), then run them
+    all with this one command. A failing task doesn't stop the rest; you get a summary at the end,
+    and the exit code is non-zero if anything failed. All results land in the normal output/ tree,
+    so the dashboard shows the whole batch.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    p = Path(file).expanduser()
+    if not p.is_file():
+        typer.secho(f"Batch file not found: {p}", fg="red")
+        raise typer.Exit(code=1)
+    import yaml as _yaml
+    try:
+        jobs = batch_commands(_yaml.safe_load(p.read_text(encoding="utf-8")) or {})
+    except ValueError as exc:
+        typer.secho(str(exc), fg="red")
+        raise typer.Exit(code=1) from None
+    if not jobs:
+        typer.secho("The batch file lists no tasks.", fg="red")
+        raise typer.Exit(code=1)
+
+    typer.echo(f"\nadarubric batch — {len(jobs)} task(s) from {p.name}\n")
+    results: list[tuple[str, int]] = []
+    for i, (path, args) in enumerate(jobs, start=1):
+        cmd = [sys.executable, "-m", "adarubric", *args]
+        typer.secho(f"[{i}/{len(jobs)}] {' '.join(args)}", bold=True)
+        if dry_run:
+            results.append((path, 0))
+            continue
+        # One subprocess per task — a crash, timeout, or missing key in one task can never take
+        # down the rest of the batch. Output streams straight to your terminal, live.
+        code = subprocess.run(cmd).returncode  # noqa: S603 - our own CLI with composed args
+        results.append((path, code))
+        if code != 0:
+            typer.secho(f"    task failed (exit {code}) - continuing with the rest", fg="yellow")
+
+    typer.echo("\nbatch summary:")
+    failed = 0
+    for path, code in results:
+        ok = code == 0
+        failed += 0 if ok else 1
+        typer.secho(f"  {'OK    ' if ok else 'FAILED'} {path}", fg=("green" if ok else "red"))
+    if dry_run:
+        typer.echo("  (dry run - nothing was executed)")
+    if failed:
+        typer.secho(f"\n{failed} of {len(results)} task(s) failed.", fg="red")
+        raise typer.Exit(code=1)
+    typer.echo("\nall done.")
+
+
 @app.command()
 def recompute(
     output: str = typer.Option("output", "--output", help="Output root to update."),

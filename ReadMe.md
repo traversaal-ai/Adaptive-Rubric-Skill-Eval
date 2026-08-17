@@ -145,7 +145,32 @@ graders:
     run: python graders/my_tests.py         # staged AFTER the agent leaves
 ```
 
-## Step 7 — The two experiments worth running
+## Step 7 — Run many tasks with one command
+
+Write a batch file once (copy [`batch.example.yaml`](batch.example.yaml)):
+
+```yaml
+defaults:                 # applied to every task unless it overrides
+  harness: gemini-cli
+  sandbox: docker
+  env_file: .env
+tasks:
+  - path: tasks/fix-logging
+    sandbox: local
+  - path: dataset/skillsbench/tasks/flood-risk-analysis
+  - path: tasks/fix-logging
+    inject_skills: no     # the control run
+```
+
+```bash
+uv run adarubric batch my-batch.yaml --dry-run   # see the commands, spend nothing
+uv run adarubric batch my-batch.yaml             # run them all, one by one
+```
+
+Tasks run in order; a failing one doesn't stop the rest; you get a summary table at the end and
+everything appears on the dashboard as usual.
+
+## Step 8 — The two experiments worth running
 
 ```bash
 # same task, skill withheld — the control. The reward gap = what the skill is worth.
@@ -301,6 +326,16 @@ from it would be meaningless. Run this before spending money on any unfamiliar t
 | `--sandbox` | `docker` | Where to run the solution. |
 | `--timeout` | task's, else 300 | Seconds allowed — some reference solutions are slow. |
 | `--output` | `output` | Where the check's own run is filed (`output/oracle/...`). |
+
+### `adarubric batch <file>` — run many tasks from one yaml
+
+`defaults:` + `tasks:` (each task = `path:` + any run flag as a key + optional raw `flags: [...]`
+for exotic ones like ACP). Runs one by one; a failure doesn't stop the rest; summary table at the
+end; exit code non-zero if anything failed.
+
+| Flag | Default | In easy words |
+|---|---|---|
+| `--dry-run` | off | Print the exact commands that would run. Runs nothing, costs nothing. |
 
 ### `adarubric recompute` — re-read old runs with today's metrics
 
