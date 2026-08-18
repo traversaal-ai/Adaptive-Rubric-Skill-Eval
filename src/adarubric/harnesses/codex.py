@@ -52,14 +52,15 @@ class CodexHarness(Harness):
         # Best-effort API-key login (writes ~/.codex/auth.json). POSIX-only; ignored elsewhere.
         run_command(
             "sh -c 'if [ -n \"$OPENAI_API_KEY\" ]; then "
-            "printenv OPENAI_API_KEY | codex login --with-api-key >/dev/null 2>&1 || true; fi' "
+            f"printenv OPENAI_API_KEY | {self.cli} login --with-api-key >/dev/null 2>&1 || true; fi' "
             "2>nul || true"
         )
         # --dangerously-bypass...: the sandbox IS the isolation; codex's own sandbox needs
         # unprivileged userns unavailable in containers. --skip-git-repo-check: temp dirs aren't repos.
+        # self.cli, not a literal: wrappers (e.g. TogetherLink's `tcodex`) subclass and swap the name.
         model_flag = f" -m {self.model}" if self.model else ""
         result = run_command(
-            "codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "
+            f"{self.cli} exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "
             f'{model_flag} --json < "{PROMPT_RELPATH}"'
         )
         return parse_codex_jsonl(result.stdout, result.stderr)

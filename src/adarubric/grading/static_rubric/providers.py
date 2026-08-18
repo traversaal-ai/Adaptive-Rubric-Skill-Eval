@@ -20,16 +20,18 @@ DEFAULT_MODELS = {
     "gemini": "gemini-3-flash-preview",
     "anthropic": "claude-sonnet-4-20250514",
     "openai": "gpt-4o",
+    "together": "Qwen/Qwen2.5-72B-Instruct-Turbo",  # override per grader with `model:`
 }
 
 _KEY_FOR = {
     "gemini": "GEMINI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
+    "together": "TOGETHER_API_KEY",  # OpenAI-compatible: https://api.together.xyz/v1
 }
 
 #: The order a provider is auto-picked in when none is configured. Gemini first, like skillgrade.
-PROVIDER_ORDER = ("gemini", "anthropic", "openai")
+PROVIDER_ORDER = ("gemini", "anthropic", "openai", "together")
 
 #: Generous on purpose: judge calls carry whole session transcripts, and flash-class models can
 #: take minutes on a big one. A timeout here costs a whole verdict, so patience is cheaper.
@@ -41,24 +43,33 @@ class JudgeError(Exception):
 
 
 def _key(provider: str, env: dict[str, str] | None) -> str | None:
+    # JUDGE_API_KEY is the judge's OWN key — it wins, so judging can bill a different account
+    # than the agent, even on the same provider. Else the provider's normal key name.
     # Deliberately env-only, NO os.environ fallback: every key the judge uses must have been handed
     # over explicitly (the CLI builds that env from --env-file, then the shell). This is what makes
     # it impossible for a test run or a library call to silently pick up someone's shell key and
     # spend money on it.
-    return (env or {}).get(_KEY_FOR[provider])
+    e = env or {}
+    return e.get("JUDGE_API_KEY") or e.get(_KEY_FOR[provider])
 
 
 def pick_provider(configured: str | None, env: dict[str, str] | None) -> str | None:
-    """The provider to use: the configured one, else the first with a key available, else None."""
-    if configured:
-        return configured
+    """The provider that judges: explicit config > the JUDGE_LLM_PROVIDER env var > the first
+    provider with a key available > None.
+
+    JUDGE_LLM_PROVIDER (+ JUDGE_API_KEY, optional JUDGE_MODEL) selects the judge INDEPENDENTLY
+    of which agent runs the task — e.g. agent on Together, judge on gemini, or the reverse."""
+    e = env or {}
+    chosen = configured or e.get("JUDGE_LLM_PROVIDER")
+    if chosen:
+        return chosen.strip().lower()
     return next((p for p in PROVIDER_ORDER if _key(p, env)), None)
 
 
 def call_judge(provider: str, model: str, prompt: str, env: dict[str, str] | None) -> str:
     """Send the prompt, return the judge's raw text reply. Raises JudgeError on any failure."""
     if provider not in _KEY_FOR:
-        raise JudgeError(f'Unknown grader provider: "{provider}". Supported: gemini, anthropic, openai')
+        raise JudgeError(f'Unknown grader provider: "{provider}". Supported: gemini, anthropic, openai, together')
     api_key = _key(provider, env)
     if not api_key:
         raise JudgeError(
@@ -69,6 +80,8 @@ def call_judge(provider: str, model: str, prompt: str, env: dict[str, str] | Non
         return _gemini(model, prompt, api_key)
     if provider == "anthropic":
         return _anthropic(model, prompt, api_key, env)
+    if provider == "together":
+        return _together(model, prompt, api_key, env)
     return _openai(model, prompt, api_key, env)
 
 
@@ -117,6 +130,22 @@ def _anthropic(model: str, prompt: str, api_key: str, env: dict[str, str] | None
         return data["content"][0]["text"]
     except (KeyError, IndexError, TypeError) as e:
         raise JudgeError(f"anthropic reply had no text: {json.dumps(data)[:300]}") from e
+
+
+def _together(model: str, prompt: str, api_key: str, env: dict[str, str] | None) -> str:
+    """Together is OpenAI-compatible; only the base URL and key differ."""
+    base = _base_url(env, "TOGETHER_BASE_URL", "https://api.together.xyz/v1")
+    data = _post(f"{base}/chat/completions",
+                 {"Authorization": f"Bearer {api_key}"},
+                 {"model": model, "temperature": 0, "max_tokens": 4096,
+                  "messages": [{"role": "user", "content": prompt}]})
+    try:
+        text = data["choices"][0]["message"].get("content") or ""
+    except (KeyError, IndexError, TypeError) as e:
+        raise JudgeError(f"together reply had no text: {json.dumps(data)[:300]}") from e
+    if not text:
+        raise JudgeError(f"together reply had no text: {json.dumps(data)[:300]}")
+    return text
 
 
 def _openai(model: str, prompt: str, api_key: str, env: dict[str, str] | None) -> str:

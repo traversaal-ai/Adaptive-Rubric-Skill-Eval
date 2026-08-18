@@ -13,11 +13,16 @@ from adarubric.harnesses.claude import ClaudeHarness
 from adarubric.harnesses.codex import CodexHarness
 from adarubric.harnesses.gemini import GeminiHarness
 from adarubric.harnesses.oracle import OracleHarness
+from adarubric.harnesses.together import ClaudeTogetherHarness, CodexTogetherHarness
 
 _REGISTRY: dict[str, Callable[[], Harness]] = {
     "claude-code": ClaudeHarness,
     "gemini-cli": GeminiHarness,
     "codex": CodexHarness,
+    # Together AI variants (TogetherLink wrappers: one TOGETHER_API_KEY runs open models through
+    # the same harnesses). Beta / unverified - see harnesses/together.py for the caveats.
+    "claude-code-together": ClaudeTogetherHarness,
+    "codex-together": CodexTogetherHarness,
     # Generic ACP wrapper — drives any Agent Client Protocol agent (configure with --acp-cmd).
     "acp": AcpHarness,
     # Not an agent: runs the task's own reference solution to prove the task can be passed at all.

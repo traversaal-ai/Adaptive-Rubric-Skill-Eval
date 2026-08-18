@@ -30,9 +30,10 @@ _INIT_MODELS = {
     "gemini": "gemini-3-flash-preview",
     "anthropic": "claude-sonnet-4-20250514",
     "openai": "gpt-4o",
+    "together": "Qwen/Qwen2.5-72B-Instruct-Turbo",
 }
 _KEY_ORDER = (("gemini", "GEMINI_API_KEY"), ("anthropic", "ANTHROPIC_API_KEY"),
-              ("openai", "OPENAI_API_KEY"))
+              ("openai", "OPENAI_API_KEY"), ("together", "TOGETHER_API_KEY"))
 
 #: skillgrade's generation prompt, verbatim apart from the three naming deltas above.
 GENERATION_PROMPT = """You are an expert at creating evaluation tasks for AI agent skills.
@@ -199,6 +200,12 @@ def _complete(provider: str, model: str, prompt: str, env: dict[str, str]) -> st
                      {"model": model, "max_tokens": 4096, "temperature": 0.3,
                       "messages": [{"role": "user", "content": prompt}]})
         return data["content"][0]["text"]
+    if provider == "together":
+        data = _post("https://api.together.xyz/v1/chat/completions",
+                     {"Authorization": f"Bearer {env['TOGETHER_API_KEY']}"},
+                     {"model": model, "max_tokens": 4096, "temperature": 0.3,
+                      "messages": [{"role": "user", "content": prompt}]})
+        return data["choices"][0]["message"]["content"]
     data = _post("https://api.openai.com/v1/chat/completions",
                  {"Authorization": f"Bearer {env['OPENAI_API_KEY']}"},
                  {"model": model, "max_tokens": 4096, "temperature": 0.3,

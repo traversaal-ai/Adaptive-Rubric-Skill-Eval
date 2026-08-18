@@ -408,20 +408,24 @@ class EvalRunner:
         # The FIXED-rubric judge — the baseline rung: SAME rubric text for every task, same
         # protocol as the static judge, weight 0. Ordered before static so the ladder reads
         # fixed -> generated static -> adaptive on every run.
+        # Judge selection is ENV-driven (JUDGE_LLM_PROVIDER / JUDGE_API_KEY / JUDGE_MODEL in the
+        # judge env) and resolved inside pick_provider/_key — independent of which agent ran the
+        # task. Nothing here to configure: agent on Together with a gemini judge just works.
+        jp, jm = None, None
         if (
             spec.run_fixed_rubric
             and not getattr(harness, "runs_oracle", False)
             and not any(g.type == "fixed_rubric" for g in specs)
-            and pick_provider(None, env) is not None
+            and pick_provider(jp, env) is not None
         ):
             specs.append(GraderSpec(
                 type="fixed_rubric", rubric=spec.fixed_rubric_text or self._fixed_rubric_text(),
-                weight=0.0, auto=True))
+                provider=jp, model=jm, weight=0.0, auto=True))
         if (
             spec.run_llm_rubric
             and not getattr(harness, "runs_oracle", False)
             and not any(g.type == "llm_rubric" for g in specs)
-            and pick_provider(None, env) is not None
+            and pick_provider(jp, env) is not None
         ):
             # Task has no rubric of its own (all of SkillsBench) → give it the same treatment
             # `init` gives user skills: an LLM writes one from the task's instruction + SKILL.md.
@@ -431,26 +435,31 @@ class EvalRunner:
             # A path in the yaml's grading block supplies the text directly; else the rubrics/
             # cache (or a fresh generation) does.
             rubric = spec.static_rubric_text or generated_task_rubric(
-                spec, env, self.rubrics_root, legacy_root=str(Path(self.output_root) / "rubrics"))
+                spec, env, self.rubrics_root, provider=jp, model=jm,
+                legacy_root=str(Path(self.output_root) / "rubrics"))
             specs.append(GraderSpec(
-                type="llm_rubric", rubric=rubric, weight=self._DEFAULT_LLM_WEIGHT, auto=True))
+                type="llm_rubric", rubric=rubric, provider=jp, model=jm,
+                weight=self._DEFAULT_LLM_WEIGHT, auto=True))
         # The ADAPTIVE rubric (step 8) — ordered LAST, after the static judge, so static's inputs
         # are exactly what they were before adaptive existed. Weight 0.0: recorded and displayed,
         # never blended into the reward until it beats static on the step-8 metrics. No criteria
         # generated (no key / API down / bad JSON) → skipped entirely; there is no generic
         # fallback for a rubric whose whole point is being task-specific.
+        # Adaptive: its own flags win, then the env-driven judge selection / key auto-pick.
+        ap = spec.adaptive_provider
+        am = spec.adaptive_model
         if (
             spec.run_adaptive_rubric
             and self.grade
             and not getattr(harness, "runs_oracle", False)
-            and pick_provider(spec.adaptive_provider, env) is not None
+            and pick_provider(ap, env) is not None
         ):
             if spec.adaptive_criteria_json:
                 criteria_json: str | None = spec.adaptive_criteria_json
             else:
                 criteria = generated_adaptive_rubric(
                     spec, env, self.rubrics_root,
-                    provider=spec.adaptive_provider, model=spec.adaptive_model,
+                    provider=ap, model=am,
                     legacy_root=str(Path(self.output_root) / "rubrics"))
                 criteria_json = json.dumps({"criteria": criteria}) if criteria is not None else None
             if criteria_json is not None:

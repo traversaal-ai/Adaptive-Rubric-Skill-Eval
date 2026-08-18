@@ -25,6 +25,7 @@ _GEN_MODELS = {
     "gemini": "gemini-3-flash-preview",
     "anthropic": "claude-sonnet-4-20250514",
     "openai": "gpt-4o",
+    "together": "Qwen/Qwen2.5-72B-Instruct-Turbo",
 }
 
 #: The rubric-writing part of skillgrade's init prompt, asked for on its own (init generates a
@@ -49,7 +50,8 @@ Respond with ONLY the rubric text. No preamble, no markdown fences."""
 
 
 def generated_task_rubric(
-    spec: EvalSpec, env: dict[str, str], rubrics_root: str, legacy_root: str | None = None
+    spec: EvalSpec, env: dict[str, str], rubrics_root: str, legacy_root: str | None = None,
+    provider: str | None = None, model: str | None = None,
 ) -> str | None:
     """The task-specific rubric: from the cache, else generated now. ``None`` = couldn't generate.
 
@@ -68,11 +70,11 @@ def generated_task_rubric(
         text = cache.read_text(encoding="utf-8").strip()
         if text:
             return text
-    provider = pick_provider(None, env)
-    if provider is None:
+    chosen = pick_provider(provider, env)
+    if chosen is None:
         return None
     try:
-        text = _generate(spec, provider, env)
+        text = _generate(spec, chosen, env, model or env.get("JUDGE_MODEL"))
     except (JudgeError, KeyError, IndexError, TypeError):
         return None
     if not text.strip():
@@ -82,7 +84,7 @@ def generated_task_rubric(
     return text.strip()
 
 
-def _generate(spec: EvalSpec, provider: str, env: dict[str, str]) -> str:
+def _generate(spec: EvalSpec, provider: str, env: dict[str, str], model: str | None = None) -> str:
     skills = []
     for p in spec.skill_paths:
         md = Path(p) / "SKILL.md"
@@ -90,7 +92,7 @@ def _generate(spec: EvalSpec, provider: str, env: dict[str, str]) -> str:
             skills.append(f"## Skill: {Path(p).name}\n\n{md.read_text(encoding='utf-8')}")
     summaries = "\n\n---\n\n".join(skills) or "## No skill files available."
     prompt = RUBRIC_PROMPT.format(instruction=spec.instruction, skill_summaries=summaries)
-    return _complete(provider, _GEN_MODELS[provider], prompt, env)
+    return _complete(provider, model or _GEN_MODELS[provider], prompt, env)
 
 
 def _complete(provider: str, model: str, prompt: str, env: dict[str, str]) -> str:
@@ -107,6 +109,12 @@ def _complete(provider: str, model: str, prompt: str, env: dict[str, str]) -> st
                      {"model": model, "max_tokens": 4096, "temperature": 0.3,
                       "messages": [{"role": "user", "content": prompt}]})
         return data["content"][0]["text"]
+    if provider == "together":
+        data = _post("https://api.together.xyz/v1/chat/completions",
+                     {"Authorization": f"Bearer {env['TOGETHER_API_KEY']}"},
+                     {"model": model, "max_tokens": 4096, "temperature": 0.3,
+                      "messages": [{"role": "user", "content": prompt}]})
+        return data["choices"][0]["message"]["content"]
     data = _post("https://api.openai.com/v1/chat/completions",
                  {"Authorization": f"Bearer {env['OPENAI_API_KEY']}"},
                  {"model": model, "max_tokens": 4096, "temperature": 0.3,

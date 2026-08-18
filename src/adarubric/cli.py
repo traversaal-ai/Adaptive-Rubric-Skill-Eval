@@ -246,7 +246,10 @@ def run(
     # Judge keys (for the LLM rubric) come from --env-file / the environment. They are handed to the
     # judge only — never injected into the sandbox, so the agent and check scripts can't read them.
     from adarubric.grading.static_rubric import pick_provider
-    judge_keys = ("GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+    judge_keys = ("GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "TOGETHER_API_KEY",
+                  # The judge OWN settings - select the judging LLM independently of the
+                  # agent: which provider, its key, and optionally its exact model.
+                  "JUDGE_LLM_PROVIDER", "JUDGE_API_KEY", "JUDGE_MODEL")
     judge_env = {k: v for k in judge_keys if (v := file_env.get(k) or os.environ.get(k))}
     if spec.run_llm_rubric:
         judge = pick_provider(None, judge_env)

@@ -1,27 +1,22 @@
 # AdaRubric — Skill Eval
 
-Measures whether a coding agent **finds, reads, and actually follows** the skill you give it —
-and scores the result four ways: the task's own script checks, a **fixed** baseline judge (same
-rubric for every task), a **static** LLM judge (this task's rubric), and an **adaptive rubric**
-(4 task-specific, evidence-checked tests — this project's research contribution, see
+Measures whether a coding agent **finds, reads, and actually follows** the skill you give it.
+Every run is scored four ways: the task's own **script checks**, a **fixed** baseline judge (same
+rubric for every task), a **static** LLM judge (this task's rubric), and the **adaptive rubric**
+(4 task-specific, evidence-checked tests — this project's research contribution:
 [ADAPTIVE-RUBRIC.md](ADAPTIVE-RUBRIC.md)).
 
-Runs real agents — Claude Code, Gemini CLI, Codex, or anything speaking ACP — in an isolated
-sandbox, on **your own tasks** or **[SkillsBench](https://github.com/benchflow-ai/skillsbench)**
-benchmark tasks.
+Agents: Claude Code, Gemini CLI, Codex, anything speaking ACP, and (Beta) open models on
+Together AI. Tasks: your own, or [SkillsBench](https://github.com/benchflow-ai/skillsbench).
 
-The one rule to remember:
-
-> **`tasks/` is yours · `rubrics/` is generated but yours to edit · `output/` is the record ·
-> `dataset/` is untouchable.**
+> The one rule: **`tasks/` is yours · `rubrics/` is generated but yours to edit ·
+> `output/` is the record · `dataset/` is untouchable.**
 
 ---
 
-# Part 1 — The guide
+# Part 1 — Setup and running
 
-Follow top to bottom. Every step says what you should see.
-
-## Step 0 — Install (once)
+## 1. Install
 
 ```bash
 git clone <this-repo> AdaRubric-Skill-Eval
@@ -30,385 +25,283 @@ uv venv
 uv pip install -e ".[dev]"
 ```
 
-## Step 1 — Prove it works, for free
+Optional sanity check (free — no keys, no Docker): `uv run pytest`. All pass, 1 skipped.
+
+## 2. Keys
+
+Copy [`.env.example`](.env.example) to `.env`, fill in what you have. One key is enough.
+Never commit `.env`.
+
+```
+ANTHROPIC_API_KEY=      # claude-code          GEMINI_API_KEY=    # gemini-cli
+OPENAI_API_KEY=         # codex                TOGETHER_API_KEY=  # *-together (Beta)
+
+JUDGE_LLM_PROVIDER=     # optional: who judges (gemini|anthropic|openai|together),
+JUDGE_API_KEY=          # with its own key — independent of which agent runs.
+JUDGE_MODEL=            # Without these: first key above judges (gemini first).
+```
+
+## 3. Run a task
 
 ```bash
-uv run adarubric --help     # prints the commands
-uv run pytest               # all pass, 1 skipped — no keys, no Docker needed
-```
-
-## Step 2 — Add keys
-
-Create `.env` in the repo root (never commit it):
-
-```
-ANTHROPIC_API_KEY=sk-ant-...      # runs claude-code
-GEMINI_API_KEY=...                # runs gemini-cli; also the default judge
-OPENAI_API_KEY=sk-...             # runs codex
-```
-
-One key is enough to start. Only the key an agent needs enters its sandbox; judge keys never do.
-
-## Step 3 — Run the example task
-
-```bash
+# the built-in example (local, no Docker; agent = the task's default, claude-code)
 uv run adarubric run tasks/fix-logging --env-file .env
+
+# pick the agent / repeat / withhold the skill (the control run)
+uv run adarubric run tasks/fix-logging --harness gemini-cli --trials 3 --env-file .env
+uv run adarubric run tasks/fix-logging --inject-skills no --env-file .env
 ```
 
-You should see: `mode=generic`, the judges `on` (fixed / static / adaptive), the agent
-working, then a reward.
-Runs locally in a temp folder — no Docker. The agent used is `claude-code` (the task's default);
-add `--harness gemini-cli` to use another.
-
-## Step 4 — Watch it
+## 4. Watch it
 
 ```bash
-python dashboard/serve.py           # http://127.0.0.1:8765
+python dashboard/serve.py        # http://127.0.0.1:8765
 ```
 
-Click any run → **Score breakdown** shows all four scorers — script checks, the fixed baseline
-judge, the static judge, and the adaptive tests with their quoted evidence — plus turns, cost,
-and whether the skill was opened. The example task's README
-([tasks/fix-logging](tasks/fix-logging/README.md)) walks through what each scorer reads.
+Click a run → **Score breakdown**: all four scorers with reasoning and evidence, turns, cost,
+whether the skill was opened.
 
-## Step 5 — Run a SkillsBench task
-
-Get the dataset (once):
+## 5. Run a SkillsBench task (needs Docker)
 
 ```bash
 git clone https://github.com/benchflow-ai/skillsbench dataset/skillsbench
-git -C dataset/skillsbench config core.autocrlf false     # Windows: keep Linux line endings
+git -C dataset/skillsbench config core.autocrlf false        # Windows only
+
+uv run adarubric check dataset/skillsbench/tasks/flood-risk-analysis   # FREE health check
 ```
 
-Health-check the task first — **free**, runs the author's own solution:
+`check` must print `OK: ... 1.00` — otherwise the task itself is broken, don't spend agents on it.
 
-```bash
-uv run adarubric check dataset/skillsbench/tasks/flood-risk-analysis
-```
-
-Must print `OK: ... scores 1.00`. If not, the task is broken — don't spend agents on it.
-
-**Manual way (recommended): review the judging before spending.**
+**Manual way (review the judging before spending):**
 
 ```bash
 uv run adarubric init dataset/skillsbench/tasks/flood-risk-analysis
-```
-
-Creates (dataset untouched):
-
-```
-tasks/flood-risk-analysis/adarubric.yaml    ← your knobs; `source:` points at the dataset
-rubrics/flood-risk-analysis/static.md       ← read/edit the static judge's rubric
-rubrics/flood-risk-analysis/adaptive.json   ← read/edit the 4 adaptive tests
-```
-
-Edit what you want, then:
-
-```bash
+# creates tasks/flood-risk-analysis/adarubric.yaml (knobs; source: points at the dataset)
+#     and rubrics/flood-risk-analysis/{static.md, adaptive.json}  ← read/edit these
 uv run adarubric run tasks/flood-risk-analysis --harness gemini-cli --sandbox docker --env-file .env
 ```
 
-**Automatic way:** skip init, run the dataset path directly — same rubric files appear on the
-first run, you just didn't review them first:
+**Automatic way:** run the dataset path directly — the same rubric files appear on first run:
 
 ```bash
 uv run adarubric run dataset/skillsbench/tasks/flood-risk-analysis --harness claude-code --sandbox docker --env-file .env
 ```
 
-SkillsBench needs `--sandbox docker` (the tasks hardcode container paths).
-
-## Step 6 — Make your own task
+## 6. Make your own task
 
 ```bash
-mkdir -p tasks/my-task/skills/my-skill
-# put your SKILL.md in tasks/my-task/skills/my-skill/
-uv run adarubric init tasks/my-task        # LLM drafts the yaml + rubrics for you
-# review tasks/my-task/adarubric.yaml and rubrics/<task>/, edit, then:
+mkdir -p tasks/my-task/skills/my-skill      # put your SKILL.md in there
+uv run adarubric init tasks/my-task         # LLM drafts the yaml + rubrics — review, edit
 uv run adarubric run tasks/my-task --harness gemini-cli --env-file .env
 ```
 
-Or write the yaml yourself — the full folder shape:
+Or by hand — the folder and its yaml:
 
 ```
 tasks/my-task/
-├─ adarubric.yaml            the control file (see Part 2)
-├─ skills/my-skill/SKILL.md  REQUIRED — the skill under test (+ optional deeper pages)
-├─ fixme.html  image.jpg     starting files — any names, anywhere, LISTED in workspace:
-└─ graders/my_tests.py       your check — never shown to the agent
+├─ adarubric.yaml            the control file (all keys in Part 2)
+├─ skills/my-skill/SKILL.md  REQUIRED — the skill under test
+├─ fixme.html  image.jpg     starting files — any names, LISTED under workspace:
+└─ graders/my_tests.py       your check — staged in AFTER the agent leaves, never seen by it
 ```
 
 ```yaml
 instruction: |
   Fix fixme.html so it renders; keep all file names unchanged.
-workspace:                   # ONLY listed files reach the agent — nothing else is copied
+workspace:                   # ONLY listed files reach the agent
   - fixme.html
-  - image.jpg                # short form lands at the top, name kept
-  - myfolder/table.jpg:myfolder/table.jpg   # src:dest form keeps the path
+  - image.jpg
 graders:
   - type: deterministic
-    run: python graders/my_tests.py         # staged AFTER the agent leaves
+    run: python graders/my_tests.py
 ```
 
-## Step 7 — Run many tasks with one command
+## 7. Run many tasks with one command
 
-Write a batch file once (copy [`batch.example.yaml`](batch.example.yaml)):
-
-```yaml
-defaults:                 # applied to every task unless it overrides
-  harness: gemini-cli
-  sandbox: docker
-  env_file: .env
-tasks:
-  - path: tasks/fix-logging
-    sandbox: local
-  - path: dataset/skillsbench/tasks/flood-risk-analysis
-  - path: tasks/fix-logging
-    inject_skills: no     # the control run
-```
+Copy [`batch.example.yaml`](batch.example.yaml), list your tasks (each with overrides if needed):
 
 ```bash
 uv run adarubric batch my-batch.yaml --dry-run   # see the commands, spend nothing
-uv run adarubric batch my-batch.yaml             # run them all, one by one
+uv run adarubric batch my-batch.yaml             # run all, one by one, summary at the end
 ```
 
-Tasks run in order; a failing one doesn't stop the rest; you get a summary table at the end and
-everything appears on the dashboard as usual.
+A failing task never stops the rest.
 
-## Step 8 — The two experiments worth running
+## Dos and don'ts
 
-```bash
-# same task, skill withheld — the control. The reward gap = what the skill is worth.
-uv run adarubric run tasks/my-task --inject-skills no --env-file .env
+**Do**
+- Run `adarubric check` on any unfamiliar SkillsBench task before spending agents — it's free.
+- Put each skill in its own folder: `skills/<name>/SKILL.md`.
+- Edit anything in `rubrics/` — your text is used as-is, never regenerated.
+- Name output files in the instruction if your grader checks them.
+- Use `--inject-skills no` runs as the control; the reward gap is what the skill is worth.
 
-# same task on three agents, three repeats each
-uv run adarubric run tasks/my-task --harness claude-code,gemini-cli,codex --trials 3 --env-file .env
-```
+**Don't**
+- Don't put a root `SKILL.md` next to other files — the whole folder becomes the skill and ships
+  to the agent, grader scripts included. Use `skills/<name>/` instead.
+- Don't drop `SKILL.md` loose inside `skills/` — it needs its own subfolder.
+- Don't create a file named `eval.yaml` — that name is the output receipt.
+- Don't grade filenames the instruction never mentions.
+- Don't edit `dataset/` or `output/`, and never put `instruction:`/`workspace:` in a `source:`
+  wrapper (the loader refuses).
+- Don't commit `.env`. A key pasted anywhere public is burned — rotate it.
 
 ---
 
 # Part 2 — Reference
 
-## The four folders
+## The folders
 
 | folder | who writes | what |
 |---|---|---|
 | `tasks/` | you (or `init` drafts) | task definitions: yaml, skill, starting files, checks |
-| `rubrics/<task>/` | generated, **you may edit** | `static.md` + `adaptive.json`. An existing file is used AS-IS, never regenerated. Delete it to regenerate. |
-| `rubrics/fixed.md` | ours by default, **yours to edit** | the ONE fixed rubric judging every task with the same words — the baseline judge. Delete to restore our default. |
+| `rubrics/<task>/` | generated, yours to edit | `static.md` + `adaptive.json` — existing files are used as-is; delete to regenerate |
+| `rubrics/fixed.md` | ours by default, yours to edit | the ONE rubric judging every task the same way (the baseline) |
 | `output/` | AdaRubric | per run: `eval.yaml` receipt, `run.json`, `grading.json`, `rubric.md`, `transcript.json`, `changes.json`, `raw.log`, `workspace/` |
 | `dataset/` | SkillsBench | never written to |
 
 ## adarubric.yaml — every key
 
 ```yaml
-defaults:                      # flags override each of these for one run
+defaults:                      # flags override each for one run
   agent: gemini-cli            # --harness
   trials: 1                    # --trials
 instruction: |                 # required (or TASK.md, or --instruction)
   ...
-workspace:                     # files copied to the agent. THREE forms:
-  - file.txt                   #   src only → lands at top, same name
-  - src/a.csv:data/a.csv       #   src:dest → lands at dest path
-  - src: x.js                  #   skillgrade dict form also accepted
-    dest: x.js
-timeout: 300                   # seconds for the agent
+workspace:                     # files copied to the agent
+  - file.txt                   #   lands at top, same name
+  - src/a.csv:data/a.csv       #   src:dest keeps/changes the path
+timeout: 300
 docker:                        # only for --sandbox docker on your own tasks
   base: python:3.12-slim
   setup: pip install pandas
 inject_skills: no              # control condition; --inject-skills overrides
-graders:                       # your script checks (0..n of them)
+graders:
   - type: deterministic
     run: python graders/check.py
     weight: 0.7
-grading:                       # THE SOURCE OF TRUTH for the LLM judges
-  fixed_rubric: yes            # the baseline judge: same text every task (rubrics/fixed.md)
-  static_rubric: yes           # yes | no | a file path (= on, use exactly that file)
-  adaptive_rubric: yes         # same. Lines left out = yes. Flags override for one run.
-source: ../../dataset/...     # SkillsBench wrapper ONLY — task comes from there; combining
-                               # source: with instruction/workspace/graders is an error
+grading:                       # which LLM judges run — the yaml is the source of truth
+  fixed_rubric: yes            # yes | no | a file path (= on, use exactly that file)
+  static_rubric: yes           # lines left out = yes; flags override for one run
+  adaptive_rubric: yes
+source: ../../dataset/...     # SkillsBench wrapper ONLY; combining with instruction/
+                               # workspace/graders is an error
 ```
 
-`TASK.md` + `grader.yaml` work as a simpler substitute for the yaml (no workspace/defaults
-support). If `adarubric.yaml` exists, it wins.
-
-## Where the skill may live (exactly four places)
-
-`SKILL.md` at the task root (whole folder becomes the skill) · `skills/<name>/` ·
-`.agents/skills/<name>/` · `.claude/skills/<name>/`. Anywhere else: point `skill: <path>` in the
-yaml, or run the SKILL.md path directly.
-
-## The no-nos
-
-1. Root `SKILL.md` + anything else in the folder → your files ship to the agent inside the skill.
-   Use `skills/<name>/` the moment a second file exists.
-2. `SKILL.md` loose inside `skills/` — it needs its own subfolder (the folder is the skill's name).
-3. Don't create a file named `eval.yaml` — that's the output receipt's name.
-4. Don't have your grader check filenames the instruction never mentions.
-5. Never edit `dataset/`; never put `instruction:`/`workspace:` in a `source:` wrapper.
-6. Never commit `.env`. A key pasted anywhere public is burned — rotate it.
+`TASK.md` + `grader.yaml` work as a simpler substitute (no workspace/defaults). The skill must
+live at the task root (whole folder = skill, only for one-skill-and-nothing-else) or under
+`skills/`, `.agents/skills/`, `.claude/skills/` — or be pointed at with `skill: <path>`.
 
 ## Scoring — the four scorers
 
-**Reward = script checks + static judge (0.3), weighted. Fixed and adaptive are shown, weight 0.**
+**Reward = script checks + static judge (0.3), weighted. Fixed and adaptive: shown, weight 0.**
 
-The four form a ladder — each rung isolates one question:
-script checks (ground truth) → **fixed** (same rubric every task: the baseline) →
-**static** (task-specific rubric, same protocol: does specific text help?) →
-**adaptive** (task-specific tests, blind + evidence: does the strict protocol help?).
+The ladder: script checks (ground truth) → **fixed** (same rubric every task — the baseline,
+standalone, sees no other verdict) → **static** (this task's rubric; sees the automated checks'
+verdicts, as skillgrade's judge did) → **adaptive** (4 generated tests, judged blind, a pass must
+quote its proof or becomes a fail). Each rung isolates one question; adaptive earns reward weight
+only if it beats static on the metrics in
+[converting/step-8](converting/step-8-adaptive-rubric.md).
 
-1. **Script checks** (deterministic / SkillsBench verifier) — run in the finished workspace,
-   AFTER the agent is gone. Score read from: `{"score": 0..1}` JSON → `REWARD SCORE: x` line →
-   exit code (0=1, 1=0). Any other exit = **grading failed**, never a zero — a broken check must
-   not read as a failing agent.
-2. **Fixed judge** — one call, same prompt shell as the static judge, but **standalone**: it
-   sees no other scorer's verdict at all, and its rubric is the same text for every task:
-   `rubrics/fixed.md` (ours is written there if you have none — edit freely, delete to restore).
-3. **Static LLM judge** — one call; rubric = the task's own, else the generated
-   `rubrics/<task>/static.md`, else a built-in fallback. Sees the whole session plus the AUTOMATED
-   checks' verdicts — and only those, never another LLM judge's opinion (true to skillgrade,
-   prompt verbatim).
-4. **Adaptive rubric** — 4 generated tests (1 completeness, 2 skill-fidelity ×2 weight,
-   1 process-quality with 3 levels), one blind judge call each, **evidence rule**: a pass must
-   quote the proving line or it becomes a fail. Not blended into the reward until it beats static
-   on correlation / separation / stability ([converting/step-8](converting/step-8-adaptive-rubric.md)).
+Script-check score reading: `{"score": 0..1}` JSON → `REWARD SCORE: x` line → exit code (0/1).
+Any other exit = **grading failed**, shown as our problem, never as a zero.
 
-Judge keys: `GEMINI_API_KEY` → `ANTHROPIC_API_KEY` → `OPENAI_API_KEY`, first found wins. No key →
-judges skip quietly, script checks still run.
+Judge selection: `JUDGE_LLM_PROVIDER`/`JUDGE_API_KEY`/`JUDGE_MODEL` in `.env` — independent of
+the agent. Unset → first key found (gemini → anthropic → openai → together). No key → judges skip
+quietly, script checks still run.
 
-## CLI — every command, every flag
+## CLI
 
-One rule for all of them: **a flag beats the yaml, the yaml beats the built-in default.**
-So the yaml is how a task normally runs; a flag is "just this once, do it differently".
+Precedence everywhere: **flag > yaml > built-in default.**
 
-### `adarubric run <path>` — run a task on an agent
+### `adarubric run <path>`
 
-`<path>` = a task folder in `tasks/`, a SkillsBench task in `dataset/`, or a bare skill folder.
-
-| Flag | Default | In easy words |
+| Flag | Default | Meaning |
 |---|---|---|
-| `--harness` | the yaml's `defaults.agent` | Which agent(s) run the task: `claude-code`, `gemini-cli`, `codex`, `acp` (any ACP agent), `oracle`. Comma-separate to run several: `--harness claude-code,codex`. Pin a model per agent with `name:model`. |
-| `--sandbox` | `local` | Where the agent works: `local` = a temp folder on your PC; `docker` = a container (required for SkillsBench). |
-| `--trials` | yaml, else 1 | How many times to repeat the run (agents are non-deterministic). |
-| `--timeout` | yaml, else 300 | Seconds the agent gets before we stop it. |
-| `--model` | the agent's own choice | Force one model for every agent in this run. |
-| `--inject-skills` | yaml, else yes | `no` = run WITHOUT giving the agent the skill — the control condition. The reward gap vs a normal run is what the skill is worth. |
-| `--llm-rubric` | yaml, else yes | `no` = skip the static LLM judge this run. |
-| `--fixed-rubric` | yaml, else yes | `no` = skip the fixed baseline judge this run. |
-| `--adaptive-rubric` | yaml, else yes | `no` = skip the adaptive rubric this run. |
-| `--adaptive-provider` | first key found | Which LLM judges/generates the adaptive rubric: `gemini`, `anthropic`, `openai`. |
-| `--adaptive-model` | provider's default | Exact model for the adaptive rubric. |
-| `--instruction "..."` | the task's own | Replace the instruction for this run. |
-| `--task <name>` | first | Pick one task from a multi-task yaml. |
-| `--dataset` | `auto` | Force the pipeline: `skillbench` or `generic`. `auto` detects from the folder shape. |
-| `--grade` / `--no-grade` | grade | `--no-grade` = run the agent, skip ALL scoring. |
-| `--output <dir>` | `output` | Where results are written. |
-| `--env-file <file>` | — | File with your `KEY=VALUE` API keys. |
+| `--harness` | yaml `defaults.agent` | `claude-code` \| `gemini-cli` \| `codex` \| `acp` \| `oracle` \| `claude-code-together` \| `codex-together` (Beta). Comma-separate for several; pin models with `name:model`. |
+| `--sandbox` | `local` | `local` or `docker` (docker required for SkillsBench) |
+| `--trials` | yaml, else 1 | repeats per launch |
+| `--timeout` | yaml, else 300 | seconds per agent run |
+| `--model` | agent's own | one model for all harnesses (required for `*-together`: a Together model id) |
+| `--inject-skills` | yaml, else yes | `no` = control run, skill withheld |
+| `--fixed-rubric` / `--llm-rubric` / `--adaptive-rubric` | yaml, else yes | switch each judge for this run |
+| `--adaptive-provider` / `--adaptive-model` | judge env / defaults | adaptive's own LLM |
+| `--instruction` / `--task` / `--dataset` / `--output` / `--grade/--no-grade` / `--env-file` | — | as named |
 
-**ACP-only flags** (running any agent that speaks ACP — full guide:
-[coding_agent_harness.md](coding_agent_harness.md)):
+ACP flags (`--acp-cmd`, `--acp-skill-dir`, `--acp-env-key`, `--acp-install`, `--acp-name`):
+see [coding_agent_harness.md](coding_agent_harness.md).
 
-| Flag | In easy words |
-|---|---|
-| `--acp-cmd` | How to start the agent, e.g. `'gemini --acp'` or `'claude-code-acp'`. Required with `--harness acp`. |
-| `--acp-skill-dir` | Where that agent looks for skills (e.g. `.claude/skills`). Get this wrong and it never finds the skill. |
-| `--acp-env-key` | The env var(s) the agent needs, e.g. `GEMINI_API_KEY` — injected and checked up front. |
-| `--acp-install` | For docker: how to install the agent into the image — a harness name (`gemini-cli`) reuses that installer, or give a shell snippet. |
-| `--acp-name` | The label the run is filed under (default: derived, e.g. `acp-gemini`). |
+### `adarubric init <path>` — drafts the config
 
-### `adarubric init <path>` — write the config for you
+Your skill folder or a SkillsBench task. Writes the yaml skeleton, generates the switched-on
+rubrics into `rubrics/<task>/`, references them by path. `--static-rubric no` /
+`--adaptive-rubric no` skip generation (no LLM spend); `--force` overwrites. SkillsBench gets a
+thin `tasks/<name>/` wrapper — the dataset is never touched.
 
-Point it at your skill folder OR a SkillsBench task. It drafts the `adarubric.yaml` skeleton,
-generates the switched-on rubrics into `rubrics/<task>/`, and references them **by path** in the
-yaml so you can see and edit them. For SkillsBench it writes a thin wrapper into `tasks/<name>/`
-(`source:` points at the dataset — nothing copied, dataset unchanged).
+### `adarubric check <task>` — free health check
 
-| Flag | Default | In easy words |
-|---|---|---|
-| `--static-rubric` | yes | `no` = don't generate the static rubric (spends nothing); writes the switch off in the yaml. Flip to `yes` later and the next run generates it. |
-| `--adaptive-rubric` | yes | Same, for the 4 adaptive tests. |
-| `--force` | off | Overwrite an existing `adarubric.yaml`. |
+Runs the SkillsBench task's own reference solution through its real grader. Healthy = 1.00.
 
-Needs an API key for the drafting (gemini → anthropic → openai, from `<path>/.env` or your
-shell); without one you get a commented template to fill in.
+### `adarubric batch <file>` — many tasks, one command
 
-### `adarubric check <task>` — is this task even passable? (free)
+`defaults:` + `tasks:` (each `path:` + any run flag as a key). `--dry-run` previews, spends nothing.
 
-Runs the SkillsBench task's **own reference solution** through its real grader — no agent, no
-key, no cost. Healthy = `OK: ... scores 1.00`. Anything less = the task is broken; agent scores
-from it would be meaningless. Run this before spending money on any unfamiliar task.
+### `adarubric recompute` — refresh past runs' metrics after harness fixes (`--apply` to write).
 
-| Flag | Default | In easy words |
-|---|---|---|
-| `--sandbox` | `docker` | Where to run the solution. |
-| `--timeout` | task's, else 300 | Seconds allowed — some reference solutions are slow. |
-| `--output` | `output` | Where the check's own run is filed (`output/oracle/...`). |
+## Editing rules
 
-### `adarubric batch <file>` — run many tasks from one yaml
+Rubric files are created only when missing; editing the yaml never touches them; switch `no`→`yes`
+reuses the existing file; delete a rubric file (or `init --force`) to regenerate. `output/` is
+append-only history.
 
-`defaults:` + `tasks:` (each task = `path:` + any run flag as a key + optional raw `flags: [...]`
-for exotic ones like ACP). Runs one by one; a failure doesn't stop the rest; summary table at the
-end; exit code non-zero if anything failed.
+## Metrics that matter
 
-| Flag | Default | In easy words |
-|---|---|---|
-| `--dry-run` | off | Print the exact commands that would run. Runs nothing, costs nothing. |
-
-### `adarubric recompute` — re-read old runs with today's metrics
-
-After a harness fix (say, turn counting improved), updates the numbers in past `run.json` files
-without re-running any agent. `--output <dir>` picks the tree; **`--apply` actually writes** —
-without it you get a preview of what would change.
-
-## Editing rules (what regenerates, what doesn't)
-
-- Rubric files are created **only when missing**. Editing the yaml (trials, agent, timeout,
-  weights, switches) never touches them. `no` → `yes` reuses the existing file; `yes` → `no`
-  leaves it on disk, unused.
-- To force a fresh rubric: delete `rubrics/<task>/<file>` and run (or `init --force`).
-- Everything in `output/` is append-only history — don't hand-edit it.
-
-## The metrics that matter (in `run.json` / dashboard)
-
-- **`skill_opened`** — true / false / null (null = the agent doesn't report enough to know).
-- **`skill_depth`** — `used` (read past the front page) / `noticed` (front page only) /
-  `not_opened`. Only `used` is real skill use.
-- **turns** — two columns on purpose: *we measured* (model replies, one definition for every
-  agent) and *agent claims* (its own number, when it reports one — they disagree).
-- **reward + score breakdown** — per grader, with the judges' reasoning and evidence.
-- **grading failed ≠ 0.00** — a broken check is our problem and is displayed as such.
+- **`skill_opened`** true/false/null (null = the agent doesn't report enough — never guessed).
+- **`skill_depth`** — `used` (read past the front page) / `noticed` / `not_opened`. Only `used`
+  is real skill use. Gemini maxes out at `noticed` (it reports no file paths).
+- **turns** — two columns: *we measured* (model replies, one definition for all agents) and
+  *agent claims* (its own number; they disagree).
+- **grading failed ≠ 0.00** — a broken check is our problem and displays as such.
 
 ## Isolation guarantees
 
-The agent's sandbox receives ONLY: `workspace:` files + the skill (control files stripped) + the
-prompt. Graders, verifiers, rubrics, yamls, receipts — never present while the agent is alive;
-checks are staged in after export. Judge keys never enter the sandbox. Secrets are redacted from
-all logs; credential files are stripped from exported workspaces.
+The sandbox receives ONLY `workspace:` files + the skill (control files stripped) + the prompt.
+Graders, verifiers, rubrics, yamls, receipts are never present while the agent is alive; checks
+stage in after export; judge keys never enter the sandbox; secrets are redacted from logs and
+credential files stripped from exports.
 
 ## Known rough edges
 
 - One Docker image per task per agent (~1.5–1.9 GB) — clean up as you go.
-- Prices are a cached snapshot; cached-input discounts not modeled.
-- Gemini can't report skill depth beyond `noticed` (no file paths in its tool tally).
-- ACP token/cost reporting varies by agent (gemini-cli reports tokens off-spec, no cost).
+- Judges cost money: fixed 1 + static 1 + adaptive 4 small calls per trial; generation 1 per task
+  (cached). No key → they skip quietly.
 - Judge-on-by-default makes SkillsBench rewards differ slightly from the paper's verifier-only
-  numbers — use `--llm-rubric no` for paper-faithful runs. Adaptive never affects the reward.
-- Judges cost money: static 1 small call/trial, adaptive 4, generation 1/task (cached).
-- codex's installer tracks its "latest" release — a codex release adding new required binaries
-  can break docker runs until the installer learns them (happened once; both binaries handled).
+  numbers — `--llm-rubric no` for paper-faithful runs. Fixed/adaptive never affect the reward.
+- Together harnesses are **Beta and unverified** (no live run yet) — validate one run before
+  trusting `skill_opened`/cost; gemini has no Together route.
+- codex's installer tracks its "latest" release — a new codex release can break docker runs until
+  the installer learns new binaries (happened once; handled).
+- Prices are a cached snapshot; ACP token/cost reporting varies by agent.
 
 ## Status
 
-| Phase | Status |
+| Piece | Status |
 |-------|--------|
-| Running (2 pipelines, local+docker, 4 harnesses + oracle, ACP incl. codex) | 🟢 |
-| Deterministic grading + isolation | 🟢 |
-| Static LLM rubric (skillgrade-verbatim judge, per-task generation) | 🟢 |
-| Adaptive rubric (4 tests, blind, evidence rule) | 🔵 built + live-validated; weight 0 until it beats static |
-| Task validation (`check`) · Init (both task kinds) | 🟢 |
-| Aggregation (pass@k) · Reporting | ⚪ planned |
+| Running: local + Docker, 4 harnesses direct + all 3 over ACP, oracle, model pinning | 🟢 verified live |
+| Deterministic grading + isolation, grading-failed vs zero | 🟢 verified live |
+| Static LLM judge (skillgrade-verbatim) + per-task generated rubrics | 🟢 verified live |
+| Fixed baseline judge (standalone, `rubrics/fixed.md`) | 🟢 built, live-run once |
+| Adaptive rubric (4 tests, blind, evidence rule, weight 0) | 🟢 built + live-validated; comparison harness pending |
+| `init` (both task kinds) · `batch` · `check` · `recompute` · dashboard | 🟢 |
+| Judge/agent separation via `JUDGE_*` env vars | 🟢 tested offline |
+| Together harnesses (`*-together` via TogetherLink) | ⚠️ Beta, wiring tested, no live run |
+| Aggregation (pass@k) · reporting · step-8 comparison metrics | ⚪ planned |
 
 ## Security
 
-Keys via `--env-file` only. Only the running harness's key enters its sandbox; judge keys stay on
-the host. Secrets are redacted from logs/transcripts; credential files stripped from exports.
-**Any key ever pasted into a chat, commit, or screenshot: rotate it.**
+Keys via `--env-file` only; only the running agent's key enters its sandbox; judge keys stay on
+the host. **Any key ever pasted into a chat, commit, or screenshot: rotate it.**
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).

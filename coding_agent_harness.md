@@ -101,6 +101,8 @@ Notes that matter:
 | `acp` + claude | ✅ Docker | clean scored run (flood-risk 1.00) via `@zed-industries/claude-code-acp` |
 | `acp` + codex | ✅ Docker | via `@zed-industries/codex-acp`; requires the ACP `authenticate` step — the client picks the auth method matching the injected env key and retries once |
 | `oracle` | ✅ Docker | |
+| `claude-code-together` | ⚠️ UNVERIFIED | Claude Code on Together models via TogetherLink's `tclaude` (Beta). Needs a live run before trusting results |
+| `codex-together` | ⚠️ UNVERIFIED | Codex on Together models via `tcodex` (Beta). Same caveat |
 
 ---
 
@@ -353,3 +355,32 @@ uv run adarubric run <task> --harness codex --inject-skills no --sandbox docker 
 
 Both runs record which skills existed and whether they were injected (`skills_injected`), so the pair
 stays comparable afterwards. That difference is the point of the whole exercise.
+
+
+---
+
+## Together AI harnesses (`claude-code-together`, `codex-together`) — Beta, UNVERIFIED
+
+One `TOGETHER_API_KEY` runs open models (Kimi, GLM, Qwen, DeepSeek, …) through the SAME
+claude-code and codex harnesses, via Together's own [TogetherLink](https://togetherlink.vercel.app)
+wrappers: `tclaude` and `tcodex` run the real CLIs through a local translation proxy pointed at
+Together's API. Because they wrap the same binaries, the output parsers are unchanged — the
+harnesses are subclasses that swap only the command, the key, and the installer.
+
+Why it matters for the research: the same open model through two different harnesses isolates the
+harness/skill-discovery variable — cross-vendor runs (each CLI on its own vendor's model) never can.
+
+```bash
+uv run adarubric run <task> --harness claude-code-together     --model <together-model-id> --sandbox docker --env-file .env   # TOGETHER_API_KEY in .env
+```
+
+Caveats (until a live run proves them out):
+- Both TogetherLink integrations are marked **Beta**; tool-calling through translation proxies is
+  where bugs live, and `skill_opened`/`skill_depth` depend on tool calls surviving translation.
+- **Pin `--model` to a Together model id** — the CLIs' vendor defaults don't exist on Together.
+- Cost fields will be wrong or empty (pricing tables don't know Together models) — report tokens.
+- The wrappers prompt for the key on first launch; the installer only verifies `command -v` so a
+  docker build can't hang on the prompt. The key itself is injected per run as usual.
+- Gemini CLI has no Together route (it can't speak to non-Google backends) — not supported.
+- The judge side needs no wrapper at all: `TOGETHER_API_KEY` is a first-class judge provider
+  (OpenAI-compatible, picked last after gemini/anthropic/openai, or pin `provider: together`).

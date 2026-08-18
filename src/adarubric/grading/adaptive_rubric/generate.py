@@ -22,6 +22,7 @@ _GEN_MODELS = {
     "gemini": "gemini-3-flash-preview",
     "anthropic": "claude-sonnet-4-20250514",
     "openai": "gpt-4o",
+    "together": "Qwen/Qwen2.5-72B-Instruct-Turbo",
 }
 
 _REQUIRED_IDS = ("completeness", "fidelity_1", "fidelity_2", "process")
@@ -60,7 +61,8 @@ def generated_adaptive_rubric(
     if chosen is None:
         return None
     try:
-        raw = _complete(chosen, model or _GEN_MODELS[chosen], _prompt(spec), env)
+        raw = _complete(chosen, model or env.get("JUDGE_MODEL") or _GEN_MODELS[chosen],
+                        _prompt(spec), env)
     except (JudgeError, KeyError):
         return None
     criteria = _parse(raw)

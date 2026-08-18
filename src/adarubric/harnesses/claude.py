@@ -40,8 +40,10 @@ class ClaudeHarness(Harness):
         # later). IS_SANDBOX=1 lets --dangerously-skip-permissions run as root inside containers
         # (the container IS the sandbox); passed as env so it works on both cmd.exe and sh.
         model_flag = f" --model {self.model}" if self.model else ""
+        # self.cli, not a literal: wrappers around the same binary (e.g. TogetherLink's `tclaude`)
+        # subclass this harness and only swap the command name — output format is identical.
         result = run_command(
-            "claude -p --output-format stream-json --verbose "
+            f"{self.cli} -p --output-format stream-json --verbose "
             f'--dangerously-skip-permissions --max-budget-usd 5{model_flag} < "{PROMPT_RELPATH}"',
             {"IS_SANDBOX": "1"},
         )

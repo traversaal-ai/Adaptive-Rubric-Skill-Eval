@@ -52,7 +52,7 @@ class AdaptiveRubricGrader(Grader):
             return GraderResult(
                 _TYPE, 0.0, grader_spec.weight, "no judge API key",
                 error="adaptive rubric needs a judge API key - none found")
-        model = grader_spec.model or DEFAULT_MODELS.get(provider, "")
+        model = grader_spec.model or (env or {}).get("JUDGE_MODEL") or DEFAULT_MODELS.get(provider, "")
         evidence = _evidence_pack(spec, transcript,
                                   file_heads=_created_file_heads(workspace, sandbox, transcript))
 

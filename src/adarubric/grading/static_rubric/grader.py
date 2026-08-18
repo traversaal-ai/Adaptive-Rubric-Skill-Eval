@@ -49,7 +49,7 @@ class LlmRubricGrader(Grader):
                 "no judge API key found (GEMINI_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY)",
                 error="llm rubric needs a judge API key - none found in --env-file or the environment",
             )
-        model = grader_spec.model or DEFAULT_MODELS.get(provider, "")
+        model = grader_spec.model or (env or {}).get("JUDGE_MODEL") or DEFAULT_MODELS.get(provider, "")
         prompt = build_prompt(rubric, build_transcript(transcript, self.prior_grader_types))
         try:
             reply = call_judge(provider, model, prompt, env)
