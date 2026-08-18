@@ -22,6 +22,7 @@ import json
 import os
 import platform
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
@@ -263,8 +264,18 @@ class EvalRunner:
 
             self._emit("stage_changed", harness.name, _safe(spec.name), attempt, TrialStage.RUNNING, trial=trial_id)
             t = time.perf_counter()
-            run_output = _run_with_timeout(
-                lambda: harness.run(spec.instruction, workspace, logged), spec.timeout_sec)
+            # While the agent works, watch its workspace and narrate file changes live — the only
+            # window into a docker container where the agent's CLI itself prints little until done.
+            watcher: _WorkspaceWatcher | None = None
+            if self.echo is not None:
+                watcher = _WorkspaceWatcher(self.sandbox, workspace, self._say, before)
+                watcher.start()
+            try:
+                run_output = _run_with_timeout(
+                    lambda: harness.run(spec.instruction, workspace, logged), spec.timeout_sec)
+            finally:
+                if watcher is not None:
+                    watcher.stop()
             run_ms = (time.perf_counter() - t) * 1000
             transcript.append(TranscriptEntry(type="run_output", timestamp=_now(),
                                                output=redact(run_output.output)))
@@ -273,6 +284,20 @@ class EvalRunner:
             self._emit("stage_changed", harness.name, _safe(spec.name), attempt, TrialStage.EXPORTING, trial=trial_id)
             after = self.sandbox.list_files(workspace)
             changes = _diff(before, after)
+            # Say what the agent actually did to the files, the moment we know it — works the same
+            # for local and docker (the diff comes from before/after snapshots of the workspace).
+            named = ([f"+ {n}" for n in changes.created if _visible(n)]
+                     + [f"~ {n}" for n in changes.modified if _visible(n)]
+                     + [f"- {n}" for n in changes.deleted if _visible(n)])
+            total = len(changes.created) + len(changes.modified) + len(changes.deleted)
+            if named:
+                extra = f" … and {len(named) - 15} more" if len(named) > 15 else ""
+                self._say("files changed (+ created, ~ modified, - deleted): "
+                          + ", ".join(named[:15]) + extra)
+            elif total:
+                self._say("only hidden/cache files changed (full list in changes.json)")
+            else:
+                self._say("no file changes in the workspace")
             # The file diff + tool usage join the transcript as judge-readable evidence. Vital for
             # ACP runs: those agents run tools inside their own process, so the "command" entries
             # are nearly empty and file changes are the only hard proof of what the agent produced.
@@ -633,6 +658,54 @@ class EvalRunner:
         self.reporter.emit(ProgressEvent(
             type=type_, timestamp=_now(), harness=harness_name, task=task, attempt=attempt,
             trial=trial, stage=stage, reward=reward, meta=meta))
+
+
+def _visible(path: str) -> bool:
+    """Paths worth narrating live. Dotfolders (agent caches, session logs, .adarubric) churn
+    constantly and would drown the feed — they stay OUT of the live lines but IN changes.json."""
+    return not any(seg.startswith(".") for seg in path.replace("\\", "/").split("/") if seg)
+
+
+class _WorkspaceWatcher:
+    """Narrates file changes WHILE the agent runs — the live view INTO the sandbox.
+
+    Every few seconds it re-snapshots the workspace through the sandbox's own ``list_files`` (a
+    directory walk locally, ``docker exec`` + hashing in a container — read-only either way) and
+    says what appeared or changed since the last look. This is what makes a docker run watchable:
+    the agent works behind the container wall, but its files can't hide.
+    """
+
+    def __init__(self, sandbox: Sandbox, workspace: str, say: Callable[[str], None],
+                 before: dict[str, str], interval: float = 5.0) -> None:
+        self._sandbox = sandbox
+        self._workspace = workspace
+        self._say = say
+        self._prev = dict(before)
+        self._interval = interval
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                now = self._sandbox.list_files(self._workspace)
+            except Exception:  # noqa: BLE001 - the live view must never break (or outlive) a run
+                continue
+            d = _diff(self._prev, now)
+            named = ([f"+ {n}" for n in d.created if _visible(n)]
+                     + [f"~ {n}" for n in d.modified if _visible(n)]
+                     + [f"- {n}" for n in d.deleted if _visible(n)])
+            if named:
+                extra = f" … and {len(named) - 10} more" if len(named) > 10 else ""
+                self._say("working: " + ", ".join(named[:10]) + extra)
+            self._prev = now
 
 
 def _grader_label(gtype: str) -> str:

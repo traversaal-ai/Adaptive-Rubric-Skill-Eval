@@ -60,7 +60,9 @@ The terminal shows everything live while it runs — docker building, files bein
 agent's own output line by line, and each judge's score the moment it lands. No flag needed.
 
 Several runs in one go? [`run_tasks.sh`](run_tasks.sh) is a ready-made, commented list of runs —
-edit it and `bash run_tasks.sh` (Windows: from Git Bash). A failing task never stops the rest.
+edit it and `bash run_tasks.sh`. A failing task never stops the rest.
+Its runs go through Docker (one container per attempt, Docker Desktop must be running); the
+`SANDBOX=` line at the top of the file switches the whole list back to `local`.
 
 ## 4. Watch it
 
@@ -75,7 +77,6 @@ whether the skill was opened.
 
 ```bash
 git clone https://github.com/benchflow-ai/skillsbench dataset/skillsbench
-git -C dataset/skillsbench config core.autocrlf false        # Windows only
 
 uv run adarubric check dataset/skillsbench/tasks/flood-risk-analysis   # FREE health check
 ```
@@ -132,7 +133,7 @@ Open [`run_tasks.sh`](run_tasks.sh) — it's a plain list of task runs with comm
 list (add tasks, change agents, uncomment the samples), then:
 
 ```bash
-bash run_tasks.sh          # Windows: run from Git Bash
+bash run_tasks.sh         
 ```
 
 Tasks run one by one; a failing one never stops the rest; everything lands on the dashboard.
