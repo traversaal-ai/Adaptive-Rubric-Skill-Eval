@@ -83,7 +83,7 @@ agent's own output line by line, and each judge's score the moment it lands. No 
 
 Several runs in one go? [`run_tasks.sh`](run_tasks.sh) is a ready-made, commented list of runs —
 edit it and `bash run_tasks.sh`. A failing task never stops the rest.
-Its runs go through Docker (one container per attempt, Docker Desktop must be running); the
+Its runs go through Docker (one container per attempt, Docker must be running); the
 `SANDBOX=` line at the top of the file switches the whole list back to `local`.
 
 ## 4. Watch it
@@ -206,7 +206,7 @@ workspace:                     # files copied to the agent
   - file.txt                   #   lands at top, same name
   - src/a.csv:data/a.csv       #   src:dest keeps/changes the path
 timeout: 300
-docker:                        # only for --sandbox docker on your own tasks
+docker:                        # your own task's container recipe (ignored with --local)
   base: python:3.12-slim
   setup: pip install pandas
 inject_skills: no              # control condition; --skill/--no-skill overrides
@@ -234,8 +234,8 @@ The ladder: script checks (ground truth) → **fixed** (same rubric every task �
 standalone, sees no other verdict) → **static** (this task's rubric; sees the automated checks'
 verdicts, as skillgrade's judge did) → **adaptive** (4 generated tests, judged blind, a pass must
 quote its proof or becomes a fail). Each rung isolates one question; adaptive earns reward weight
-only if it beats static on the metrics in
-[converting/step-8](converting/step-8-adaptive-rubric.md).
+only once it beats static on the planned comparison metrics (correlation with the script checks,
+separation, stability).
 
 Script-check score reading: `{"score": 0..1}` JSON → `REWARD SCORE: x` line → exit code (0/1).
 Any other exit = **grading failed**, shown as our problem, never as a zero.
@@ -342,7 +342,7 @@ TogetherLink translation proxy end to end — validate one run per harness befor
 | Static LLM judge (skillgrade-verbatim) + per-task generated rubrics | 🟢 verified live |
 | Fixed baseline judge (standalone, `rubrics/fixed.md`) | 🟢 built, live-run once |
 | Adaptive rubric (4 tests, blind, evidence rule, weight 0) | 🟢 built + live-validated; comparison harness pending |
-| `init` (both task kinds) · `batch` · `check` · `recompute` · dashboard | 🟢 |
+| `init` (both task kinds) · `check` · `recompute` · `run_tasks.sh` · dashboard | 🟢 |
 | Judge/agent separation via `JUDGE_*` env vars | 🟢 tested offline |
 | Together harnesses (`*-together` via TogetherLink) | ⚠️ Beta, wiring tested, no live run |
 | Aggregation (pass@k) · reporting · step-8 comparison metrics | ⚪ planned |

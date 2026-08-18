@@ -5,11 +5,10 @@
 #     bash run_tasks.sh
 #
 # Every run happens IN DOCKER: one fresh container per attempt, the agent CLI and
-# the skills installed inside it, your machine untouched. Start Docker Desktop
+# the skills installed inside it, your machine untouched. Have Docker running
 # first. (The first run builds the image — a few minutes; later runs reuse it.)
 #
-# (Windows: run it from Git Bash. Keys are read from ./.env automatically —
-#  copy .env.example to .env first.)
+# (Keys are read from ./.env automatically — copy .env.example to .env first.)
 #
 # Each line below is one task run. Edit the list: change harnesses, add
 # --trials 3, add tasks, comment lines out with '#'. Every run shows its
