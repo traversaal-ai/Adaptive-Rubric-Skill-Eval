@@ -29,8 +29,9 @@ Optional sanity check (free — no keys, no Docker): `uv run pytest`. All pass, 
 
 ## 2. Keys
 
-Copy [`.env.example`](.env.example) to `.env`, fill in what you have. One key is enough.
-Never commit `.env`.
+Copy [`.env.example`](.env.example) to `.env` in the project root, fill in what you have. One
+key is enough. Every command reads it from there automatically — no flag to pass, nothing to
+export. Never commit `.env`.
 
 ```
 ANTHROPIC_API_KEY=      # claude-code          GEMINI_API_KEY=    # gemini-cli
@@ -43,14 +44,20 @@ JUDGE_MODEL=            # Without these: first key above judges (gemini first).
 
 ## 3. Run a task
 
-```bash
-# the built-in example (local, no Docker; agent = the task's default, claude-code)
-uv run adarubric run tasks/fix-logging --env-file .env
+Two runs. The first gives the agent the skill, the second withholds it. That pair IS the
+measurement — the gap between the two scores is what the skill was worth.
 
-# pick the agent / repeat / withhold the skill (the control run)
-uv run adarubric run tasks/fix-logging --harness gemini-cli --trials 3 --env-file .env
-uv run adarubric run tasks/fix-logging --inject-skills no --env-file .env
+```bash
+uv run adarubric eval tasks/fix-logging                            # with the skill
+uv run adarubric eval tasks/fix-logging --inject-skills no-skill   # without it
 ```
+
+That's the whole command. Everything else (which agent, how many trials, which judges) is already
+set in the task's `adarubric.yaml`; flags to override it for one run are in
+the [CLI](#cli) section further down, and you can ignore them until you need them.
+
+Several runs in one go? [`run_tasks.sh`](run_tasks.sh) is a ready-made, commented list of runs —
+edit it and `bash run_tasks.sh` (Windows: from Git Bash). A failing task never stops the rest.
 
 ## 4. Watch it
 
@@ -78,13 +85,13 @@ uv run adarubric check dataset/skillsbench/tasks/flood-risk-analysis   # FREE he
 uv run adarubric init dataset/skillsbench/tasks/flood-risk-analysis
 # creates tasks/flood-risk-analysis/adarubric.yaml (knobs; source: points at the dataset)
 #     and rubrics/flood-risk-analysis/{static.md, adaptive.json}  ← read/edit these
-uv run adarubric run tasks/flood-risk-analysis --harness gemini-cli --sandbox docker --env-file .env
+uv run adarubric eval tasks/flood-risk-analysis --harness gemini-cli --sandbox docker
 ```
 
 **Automatic way:** run the dataset path directly — the same rubric files appear on first run:
 
 ```bash
-uv run adarubric run dataset/skillsbench/tasks/flood-risk-analysis --harness claude-code --sandbox docker --env-file .env
+uv run adarubric eval dataset/skillsbench/tasks/flood-risk-analysis --harness claude-code --sandbox docker
 ```
 
 ## 6. Make your own task
@@ -92,7 +99,7 @@ uv run adarubric run dataset/skillsbench/tasks/flood-risk-analysis --harness cla
 ```bash
 mkdir -p tasks/my-task/skills/my-skill      # put your SKILL.md in there
 uv run adarubric init tasks/my-task         # LLM drafts the yaml + rubrics — review, edit
-uv run adarubric run tasks/my-task --harness gemini-cli --env-file .env
+uv run adarubric eval tasks/my-task --harness gemini-cli
 ```
 
 Or by hand — the folder and its yaml:
@@ -118,14 +125,15 @@ graders:
 
 ## 7. Run many tasks with one command
 
-Copy [`batch.example.yaml`](batch.example.yaml), list your tasks (each with overrides if needed):
+Open [`run_tasks.sh`](run_tasks.sh) — it's a plain list of task runs with comments. Edit the
+list (add tasks, change agents, uncomment the samples), then:
 
 ```bash
-uv run adarubric batch my-batch.yaml --dry-run   # see the commands, spend nothing
-uv run adarubric batch my-batch.yaml             # run all, one by one, summary at the end
+bash run_tasks.sh          # Windows: run from Git Bash
 ```
 
-A failing task never stops the rest.
+Tasks run one by one; a failing one never stops the rest; everything lands on the dashboard.
+
 
 ## Dos and don'ts
 
@@ -134,7 +142,7 @@ A failing task never stops the rest.
 - Put each skill in its own folder: `skills/<name>/SKILL.md`.
 - Edit anything in `rubrics/` — your text is used as-is, never regenerated.
 - Name output files in the instruction if your grader checks them.
-- Use `--inject-skills no` runs as the control; the reward gap is what the skill is worth.
+- Use `--inject-skills no-skill` runs as the control; the reward gap is what the skill is worth.
 
 **Don't**
 - Don't put a root `SKILL.md` next to other files — the whole folder becomes the skill and ships
@@ -214,7 +222,7 @@ quietly, script checks still run.
 
 Precedence everywhere: **flag > yaml > built-in default.**
 
-### `adarubric run <path>`
+### `adarubric eval <path>`
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -223,10 +231,13 @@ Precedence everywhere: **flag > yaml > built-in default.**
 | `--trials` | yaml, else 1 | repeats per launch |
 | `--timeout` | yaml, else 300 | seconds per agent run |
 | `--model` | agent's own | one model for all harnesses (required for `*-together`: a Together model id) |
-| `--inject-skills` | yaml, else yes | `no` = control run, skill withheld |
+| `--inject-skills` | yaml, else `skill` | `no-skill` = the control run, skill withheld |
 | `--fixed-rubric` / `--llm-rubric` / `--adaptive-rubric` | yaml, else yes | switch each judge for this run |
 | `--adaptive-provider` / `--adaptive-model` | judge env / defaults | adaptive's own LLM |
-| `--instruction` / `--task` / `--dataset` / `--output` / `--grade/--no-grade` / `--env-file` | — | as named |
+| `--instruction` / `--task` / `--dataset` / `--output` / `--grade/--no-grade` | — | as named |
+
+Keys are not a flag: `.env` in the folder you run from is loaded on every command, and your shell
+environment fills in the rest.
 
 ACP flags (`--acp-cmd`, `--acp-skill-dir`, `--acp-env-key`, `--acp-install`, `--acp-name`):
 see [coding_agent_harness.md](coding_agent_harness.md).
@@ -241,10 +252,6 @@ thin `tasks/<name>/` wrapper — the dataset is never touched.
 ### `adarubric check <task>` — free health check
 
 Runs the SkillsBench task's own reference solution through its real grader. Healthy = 1.00.
-
-### `adarubric batch <file>` — many tasks, one command
-
-`defaults:` + `tasks:` (each `path:` + any run flag as a key). `--dry-run` previews, spends nothing.
 
 ### `adarubric recompute` — refresh past runs' metrics after harness fixes (`--apply` to write).
 
@@ -269,6 +276,22 @@ The sandbox receives ONLY `workspace:` files + the skill (control files stripped
 Graders, verifiers, rubrics, yamls, receipts are never present while the agent is alive; checks
 stage in after export; judge keys never enter the sandbox; secrets are redacted from logs and
 credential files stripped from exports.
+
+## Together AI — what works right now
+
+One `TOGETHER_API_KEY` (open models: Kimi, GLM, Qwen, DeepSeek, …). Status per piece:
+
+| use | status | how |
+|---|---|---|
+| **Judge** (fixed / static / adaptive + rubric generation) | ✅ works today | `JUDGE_LLM_PROVIDER=together` + the key — or just have it as your only key |
+| **Agent: Claude Code on Together** | ⚠️ Beta, unverified | `--harness claude-code-together --model <together-model-id>` (TogetherLink's `tclaude`) |
+| **Agent: Codex on Together** | ⚠️ Beta, unverified | `--harness codex-together --model <together-model-id>` (TogetherLink's `tcodex`) |
+| **Agent: ACP + Claude bridge on Together** | possible, undocumented territory | inject `ANTHROPIC_BASE_URL` etc. via `--acp-env-key` — see [coding_agent_harness.md](coding_agent_harness.md) |
+| **Agent: Gemini CLI on Together** | ❌ not possible | gemini-cli can't talk to non-Google backends |
+
+"Beta, unverified" means: the wiring is tested offline, but no live run has proven the
+TogetherLink translation proxy end to end — validate one run per harness before trusting
+`skill_opened` or cost from them. Always pin `--model` to a Together model id.
 
 ## Known rough edges
 
@@ -299,7 +322,8 @@ credential files stripped from exports.
 
 ## Security
 
-Keys via `--env-file` only; only the running agent's key enters its sandbox; judge keys stay on
+Keys via `.env` (or your shell env) only, never on the command line; only the running agent's
+key enters its sandbox; judge keys stay on
 the host. **Any key ever pasted into a chat, commit, or screenshot: rotate it.**
 
 ## License

@@ -232,7 +232,7 @@ class DockerSandbox(Sandbox):
         # (SkillsBench-faithful: /root/.claude/skills etc; cwd-independent).
         if not spec.inject_skills:
             withheld = ", ".join(Path(p).name for p in spec.skill_paths) or "none"
-            self._note(f"skills NOT injected (--inject-skills no) — withheld: {withheld}")
+            self._note(f"skills NOT injected (--inject-skills no-skill) — withheld: {withheld}")
         for d in harness.skill_dirs if spec.inject_skills else ():
             base = f"{_HOME}/{d}"
             _docker("exec", cid, "sh", "-c", f"mkdir -p '{base}'")

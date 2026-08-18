@@ -1,7 +1,7 @@
 """The three judge APIs — gemini / anthropic / openai — and how a provider gets picked.
 
 Ported from skillgrade: same env var names, same request shapes, temperature 0, same default
-models. Key lookup checks the run's env first (what ``--env-file`` loaded), then the process
+models. Key lookup checks the run's env first (what ``.env`` supplied), then the process
 environment — the same precedence skillgrade uses.
 
 Provider choice when the task doesn't name one: whichever key is present, gemini first —
@@ -46,7 +46,7 @@ def _key(provider: str, env: dict[str, str] | None) -> str | None:
     # JUDGE_API_KEY is the judge's OWN key — it wins, so judging can bill a different account
     # than the agent, even on the same provider. Else the provider's normal key name.
     # Deliberately env-only, NO os.environ fallback: every key the judge uses must have been handed
-    # over explicitly (the CLI builds that env from --env-file, then the shell). This is what makes
+    # over explicitly (the CLI builds that env from .env, then the shell). This is what makes
     # it impossible for a test run or a library call to silently pick up someone's shell key and
     # spend money on it.
     e = env or {}
@@ -73,7 +73,7 @@ def call_judge(provider: str, model: str, prompt: str, env: dict[str, str] | Non
     api_key = _key(provider, env)
     if not api_key:
         raise JudgeError(
-            f"Missing {_KEY_FOR[provider]}. Set it (e.g. in your --env-file) to use the "
+            f"Missing {_KEY_FOR[provider]}. Set it (e.g. in .env) to use the "
             f'"{provider}" judge.'
         )
     if provider == "gemini":

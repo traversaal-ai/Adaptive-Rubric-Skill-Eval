@@ -7,7 +7,7 @@
 # Fallbacks for when the command line doesn't say. Precedence: CLI flag > this block > built-ins,
 # so `--harness codex --trials 5` overrides both lines.
 defaults:
-  agent: claude-code
+  agent: gemini-cli
   trials: 1
 
 instruction: |

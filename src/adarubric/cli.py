@@ -33,7 +33,8 @@ def main_callback(
     """AdaRubric skill evaluation harness."""
 
 
-@app.command()
+@app.command("eval")
+@app.command("run", hidden=True)   # the old name, still accepted
 def run(
     path: str = typer.Argument(
         ..., help="Path to a skill folder or a SkillsBench task package."
@@ -122,13 +123,10 @@ def run(
     ),
     inject_skills: str = typer.Option(
         None, "--inject-skills",
-        help="Give the agent the task's skills: yes | no. 'no' runs the SAME task with the "
-        "guidance withheld — the control half of 'did the skill actually help?'. Default: the "
-        "yaml's inject_skills (else yes); this flag overrides for one run. Either way the run "
-        "records which skills existed. Accepts yes/no, true/false, 1/0, on/off.",
-    ),
-    env_file: str = typer.Option(
-        None, "--env-file", help="Load KEY=VALUE env vars (e.g. API keys) from a file."
+        help="Which of the two conditions to run: skill | no-skill. 'no-skill' runs the SAME "
+        "task with the guidance withheld — the control half of 'did the skill actually help?'. "
+        "Default: the yaml's inject_skills (else skill); this flag overrides for one run. Either "
+        "way the run records which skills existed.",
     ),
     acp_cmd: str = typer.Option(
         None, "--acp-cmd",
@@ -137,7 +135,7 @@ def run(
     acp_env_key: str = typer.Option(
         None, "--acp-env-key",
         help="For --harness acp: comma-separated env var(s) the ACP agent needs (declares them so "
-        "they're injected from --env-file and checked up-front). Optional; the agent also inherits "
+        "they're injected from .env and checked up-front). Optional; the agent also inherits "
         "your shell environment.",
     ),
     acp_install: str = typer.Option(
@@ -165,6 +163,8 @@ def run(
     user skill/task (SKILL.md folder, optionally with an adarubric.yaml/eval.yaml supplying the
     instruction, workspace files, and docker recipe). The chosen harness declares which env var it
     needs (e.g. claude-code -> ANTHROPIC_API_KEY); only that key is injected. Missing key -> fail fast.
+
+    Keys are read from `.env` in the folder you run from, plus your shell environment. No flag.
     """
     import os
 
@@ -176,7 +176,7 @@ def run(
     from adarubric.runner import EvalRunner
     from adarubric.sandboxes.registry import create_sandbox
 
-    file_env = _load_env_file(env_file) if env_file else {}
+    file_env = _root_env()   # ./.env, automatically - see _root_env
 
     spec = load_spec(path, instruction, task=task)
 
@@ -194,7 +194,7 @@ def run(
     harness_specs = _parse_harness_specs(harness, model)
 
     if inject_skills is not None:  # flag > yaml's inject_skills > default yes
-        spec.inject_skills = _parse_bool_flag(inject_skills, "--inject-skills")
+        spec.inject_skills = _parse_skill_mode(inject_skills)
     # Judge switches: CLI flag (when passed) > the yaml's grading: block > default on.
     if llm_rubric is not None:
         spec.run_llm_rubric = _parse_bool_flag(llm_rubric, "--llm-rubric")
@@ -207,7 +207,7 @@ def run(
     if not spec.inject_skills:
         withheld = ", ".join(os.path.basename(p) for p in spec.skill_paths) or "none"
         typer.secho(
-            f"--inject-skills no: withholding {withheld}. This is the CONTROL run — compare its "
+            f"--inject-skills no-skill: withholding {withheld}. This is the CONTROL run — compare its "
             f"reward against a normal run to see what the skill is worth.", fg="yellow",
         )
 
@@ -243,7 +243,7 @@ def run(
     graders = "skillbench-verifier" if spec.mode == "skillbench" else f"{len(spec.graders)} grader(s)"
     typer.echo(f"mode={spec.mode}  sandbox={sandbox}  task={spec.name}  grade={grade} ({graders})")
 
-    # Judge keys (for the LLM rubric) come from --env-file / the environment. They are handed to the
+    # Judge keys (for the LLM rubric) come from .env / the environment. They are handed to the
     # judge only — never injected into the sandbox, so the agent and check scripts can't read them.
     from adarubric.grading.static_rubric import pick_provider
     judge_keys = ("GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "TOGETHER_API_KEY",
@@ -325,12 +325,12 @@ def run(
         typer.echo(
             f"harness={h.name}  model={hmodel or 'not pinned - the CLI picks; the name it reports is recorded'}"
         )
-        # Fail fast if the harness's declared key isn't available (env or --env-file).
+        # Fail fast if the harness's declared key isn't available (shell env or .env).
         missing = [k for k in h.env_keys if not (os.environ.get(k) or file_env.get(k))]
         if missing:
             typer.secho(
                 f"Missing env var(s) for '{hname}': {', '.join(missing)} "
-                f"(export them or pass --env-file).",
+                f"(put them in .env, or export them).",
                 fg="red",
             )
             raise typer.Exit(code=1)
@@ -485,7 +485,7 @@ def init(
     A SkillsBench task: the dataset folder is NEVER written to. Instead you get a thin wrapper —
     tasks/<name>/adarubric.yaml whose `source:` points at the dataset (verifier, Dockerfile, data
     stay there) — plus the generated rubrics in rubrics/<name>/ for review. Edit, then
-    `adarubric run tasks/<name>`.
+    `adarubric eval tasks/<name>`.
     """
     import os
     from pathlib import Path
@@ -525,7 +525,7 @@ def init(
         out_path.write_text(
             render_template("my-skill", "Describe what the agent should do with this skill."),
             encoding="utf-8")
-        typer.echo(f"  Created {out_path.name}. Edit it, then run: adarubric run {path}")
+        typer.echo(f"  Created {out_path.name}. Edit it, then run: adarubric eval {path}")
         return
 
     typer.echo(f"  Found {len(skills)} skill(s): {', '.join(n for n, _ in skills)}\n")
@@ -677,99 +677,11 @@ def _init_skillbench(task_dir, force: bool, want_static: bool, want_adaptive: bo
         typer.secho(f"  warning: wrapper doesn't load cleanly ({exc}).", fg="yellow")
     typer.echo(
         f"\n  Review/edit the rubrics, then run:\n"
-        f"    uv run adarubric run tasks/{name} --harness <agent> --sandbox docker --env-file .env\n")
+        f"    uv run adarubric eval tasks/{name} --harness <agent> --sandbox docker\n")
 
 
-#: batch.yaml keys that map 1:1 onto `adarubric run` flags (underscores become dashes).
-_BATCH_FLAG_KEYS = (
-    "harness", "sandbox", "model", "dataset", "instruction", "task", "output", "trials",
-    "timeout", "inject_skills", "llm_rubric", "adaptive_rubric", "adaptive_provider",
-    "adaptive_model", "env_file",
-)
-
-
-def batch_commands(cfg: dict) -> list[tuple[str, list[str]]]:
-    """(task path, run-args) per task from a batch file. Pure — unit-tested without subprocesses.
-
-    Each task entry: ``path`` (required) + any run flag as a key (task overrides ``defaults``) +
-    an optional raw ``flags: [...]`` list appended verbatim for anything exotic (ACP flags etc.).
-    """
-    defaults = cfg.get("defaults") or {}
-    jobs: list[tuple[str, list[str]]] = []
-    for i, t in enumerate(cfg.get("tasks") or [], start=1):
-        if not isinstance(t, dict) or not t.get("path"):
-            raise ValueError(f"batch task #{i} needs a `path:`")
-        merged = {**defaults, **t}
-        args = ["run", str(merged["path"])]
-        for key in _BATCH_FLAG_KEYS:
-            value = merged.get(key)
-            if value is not None:
-                # yaml reads bare yes/no as booleans — hand the flag the words it expects.
-                text = ("yes" if value else "no") if isinstance(value, bool) else str(value)
-                args += [f"--{key.replace('_', '-')}", text]
-        args += [str(x) for x in (merged.get("flags") or [])]
-        jobs.append((str(merged["path"]), args))
-    return jobs
-
-
-@app.command()
-def batch(
-    file: str = typer.Argument(..., help="A batch yaml: defaults + tasks[] (see batch.example.yaml)."),
-    dry_run: bool = typer.Option(
-        False, "--dry-run", help="Print the commands that WOULD run, run nothing, spend nothing."),
-) -> None:
-    """Run many tasks one by one from a single yaml file.
-
-    Define your tasks once (each with its own harness/sandbox/trials/... if needed), then run them
-    all with this one command. A failing task doesn't stop the rest; you get a summary at the end,
-    and the exit code is non-zero if anything failed. All results land in the normal output/ tree,
-    so the dashboard shows the whole batch.
-    """
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    p = Path(file).expanduser()
-    if not p.is_file():
-        typer.secho(f"Batch file not found: {p}", fg="red")
-        raise typer.Exit(code=1)
-    import yaml as _yaml
-    try:
-        jobs = batch_commands(_yaml.safe_load(p.read_text(encoding="utf-8")) or {})
-    except ValueError as exc:
-        typer.secho(str(exc), fg="red")
-        raise typer.Exit(code=1) from None
-    if not jobs:
-        typer.secho("The batch file lists no tasks.", fg="red")
-        raise typer.Exit(code=1)
-
-    typer.echo(f"\nadarubric batch — {len(jobs)} task(s) from {p.name}\n")
-    results: list[tuple[str, int]] = []
-    for i, (path, args) in enumerate(jobs, start=1):
-        cmd = [sys.executable, "-m", "adarubric", *args]
-        typer.secho(f"[{i}/{len(jobs)}] {' '.join(args)}", bold=True)
-        if dry_run:
-            results.append((path, 0))
-            continue
-        # One subprocess per task — a crash, timeout, or missing key in one task can never take
-        # down the rest of the batch. Output streams straight to your terminal, live.
-        code = subprocess.run(cmd).returncode  # noqa: S603 - our own CLI with composed args
-        results.append((path, code))
-        if code != 0:
-            typer.secho(f"    task failed (exit {code}) - continuing with the rest", fg="yellow")
-
-    typer.echo("\nbatch summary:")
-    failed = 0
-    for path, code in results:
-        ok = code == 0
-        failed += 0 if ok else 1
-        typer.secho(f"  {'OK    ' if ok else 'FAILED'} {path}", fg=("green" if ok else "red"))
-    if dry_run:
-        typer.echo("  (dry run - nothing was executed)")
-    if failed:
-        typer.secho(f"\n{failed} of {len(results)} task(s) failed.", fg="red")
-        raise typer.Exit(code=1)
-    typer.echo("\nall done.")
+# Batch runs: edit run_tasks.sh at the repo root and `bash run_tasks.sh` — one line per task,
+# a failing task never stops the rest. (The old yaml-based `batch` command was replaced by it.)
 
 
 @app.command()
@@ -962,6 +874,23 @@ _TRUE = {"yes", "y", "true", "t", "1", "on"}
 _FALSE = {"no", "n", "false", "f", "0", "off"}
 
 
+def _parse_skill_mode(value: str) -> bool:
+    """``--inject-skills skill | no-skill`` -> inject or withhold.
+
+    Named after the two conditions this benchmark compares, not yes/no: the word you type is the
+    experiment you ran, so a half-remembered flag can't quietly produce the wrong one.
+    """
+    v = (value or "").strip().lower().replace("_", "-")
+    if v == "skill":
+        return True
+    if v == "no-skill":
+        return False
+    typer.secho(
+        f"--inject-skills expects skill or no-skill — got '{value}'.", fg="red"
+    )
+    raise typer.Exit(code=1)
+
+
 def _parse_bool_flag(value: str, flag: str) -> bool:
     """Accept the several spellings people actually type for a yes/no flag."""
     v = (value or "").strip().lower()
@@ -997,6 +926,17 @@ def _fmt_cost(cost: float | None) -> str:
     return f"${cost:.4f}" if cost is not None else "n/a"
 
 
+def _root_env() -> dict[str, str]:
+    """Keys from `.env` in the current folder - loaded on every run, no flag.
+
+    Replaced the old `--env-file`: keys live in one place, and forgetting a flag can no longer
+    make a paid run die on a missing key. No `.env`? Fine - the shell environment stands alone.
+    """
+    from pathlib import Path
+
+    return _load_env_file(".env") if Path(".env").is_file() else {}
+
+
 def _load_env_file(path: str) -> dict[str, str]:
     """Parse a simple KEY=VALUE .env file (ignoring blanks and # comments)."""
     from pathlib import Path
@@ -1007,8 +947,30 @@ def _load_env_file(path: str) -> dict[str, str]:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        env[key.strip()] = value.strip().strip("'\"")
+        env[key.strip()] = _env_value(value)
     return env
+
+
+def _env_value(value: str) -> str:
+    """Return a dotenv-ish value, preserving quoted # and trimming inline comments."""
+    value = value.strip()
+    if not value:
+        return ""
+    if value[0] in ("'", '"'):
+        quote = value[0]
+        escaped = False
+        for i, ch in enumerate(value[1:], start=1):
+            if ch == "\\" and not escaped:
+                escaped = True
+                continue
+            if ch == quote and not escaped:
+                return value[1:i]
+            escaped = False
+        return value.strip(quote)
+    for i, ch in enumerate(value):
+        if ch == "#" and (i == 0 or value[i - 1].isspace()):
+            return value[:i].strip()
+    return value
 
 
 def main() -> None:

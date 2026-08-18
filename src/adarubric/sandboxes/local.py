@@ -49,10 +49,10 @@ class LocalSandbox(Sandbox):
 
         # 3. Inject each skill into the RUNNING harness's discovery dir(s) — relative to the
         #    workspace root (local runs the agent with cwd=workspace, so project discovery finds it).
-        #    Skipped entirely for `--inject-skills no`, the control half of "did the skill help?".
+        #    Skipped entirely for `--inject-skills no-skill`, the control half of "did the skill help?".
         if not spec.inject_skills:
             withheld = ", ".join(Path(p).name for p in spec.skill_paths) or "none"
-            self._note(f"skills NOT injected (--inject-skills no) — withheld: {withheld}")
+            self._note(f"skills NOT injected (--inject-skills no-skill) — withheld: {withheld}")
         for discovery in harness.skill_dirs if spec.inject_skills else ():
             base = root / discovery
             base.mkdir(parents=True, exist_ok=True)

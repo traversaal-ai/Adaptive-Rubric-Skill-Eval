@@ -123,7 +123,7 @@ Sources: claude-code and codex from SkillsBench's source audit
 
 **Skills are copied in at container start — never baked into the image.** SkillsBench's own review
 checklist calls baking an antipattern, for a good reason: if the skill is in the image, a
-`--inject-skills no` control run would still see it, and the comparison would be worthless.
+`--inject-skills no-skill` control run would still see it, and the comparison would be worthless.
 
 Control files (`grader.yaml`, `adarubric.yaml`, `TASK.md`, `eval.yaml`) are **stripped from the copy**,
 so an agent can never read its own marking scheme out of a skill folder.
@@ -191,35 +191,35 @@ Ours is dependency-free: a small JSON-RPC client, no SDK.
 
 ```bash
 # gemini (ACP is built into its CLI)
-uv run adarubric run <task> --harness acp \
+uv run adarubric eval <task> --harness acp \
     --acp-cmd 'gemini --acp' \
     --acp-skill-dir '.gemini/skills' \
     --acp-env-key GEMINI_API_KEY \
     --acp-install gemini-cli \
-    --dataset skillbench --sandbox docker --env-file .env
+    --dataset skillbench --sandbox docker
 ```
 
 ```bash
 # claude, via the Zed bridge — installed at BUILD time, not with npx at run time
-uv run adarubric run <task> --harness acp \
+uv run adarubric eval <task> --harness acp \
     --acp-cmd 'claude-code-acp' \
     --acp-skill-dir '.claude/skills' \
     --acp-env-key ANTHROPIC_API_KEY \
     --acp-install "curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
                    && apt-get install -y nodejs && npm i -g @zed-industries/claude-code-acp" \
-    --dataset skillbench --sandbox docker --env-file .env
+    --dataset skillbench --sandbox docker
 ```
 
 ```bash
 # codex, via the Zed bridge — NOTE: codex-acp demands the ACP `authenticate` step; the client
 # handles it (picks the auth method matching the env key it injected, then retries session/new).
-uv run adarubric run <task> --harness acp \
+uv run adarubric eval <task> --harness acp \
     --acp-cmd 'codex-acp' \
     --acp-skill-dir '.agents/skills' \
     --acp-env-key OPENAI_API_KEY \
     --acp-install "curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
                    && apt-get install -y nodejs && npm i -g @zed-industries/codex-acp" \
-    --dataset skillbench --sandbox docker --env-file .env
+    --dataset skillbench --sandbox docker
 ```
 
 > **Don't use `npx -y` as the run command.** It downloads the package *during* the run, inside the
@@ -349,8 +349,8 @@ its own docstring).
 The number that answers "is this skill any good?" isn't one run — it's the gap between two:
 
 ```bash
-uv run adarubric run <task> --harness codex --sandbox docker --env-file .env                      # with
-uv run adarubric run <task> --harness codex --inject-skills no --sandbox docker --env-file .env   # without
+uv run adarubric eval <task> --harness codex --sandbox docker                      # with
+uv run adarubric eval <task> --harness codex --inject-skills no-skill --sandbox docker   # without
 ```
 
 Both runs record which skills existed and whether they were injected (`skills_injected`), so the pair
@@ -371,7 +371,7 @@ Why it matters for the research: the same open model through two different harne
 harness/skill-discovery variable — cross-vendor runs (each CLI on its own vendor's model) never can.
 
 ```bash
-uv run adarubric run <task> --harness claude-code-together     --model <together-model-id> --sandbox docker --env-file .env   # TOGETHER_API_KEY in .env
+uv run adarubric eval <task> --harness claude-code-together     --model <together-model-id> --sandbox docker   # TOGETHER_API_KEY in .env
 ```
 
 Caveats (until a live run proves them out):

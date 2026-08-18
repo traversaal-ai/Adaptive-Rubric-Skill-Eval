@@ -16,7 +16,7 @@ fix-logging/
 Run it:
 
 ```bash
-uv run adarubric run examples/fix-logging --harness claude-code --env-file .env
+uv run adarubric eval examples/fix-logging --harness claude-code
 ```
 
 ## What it checks
@@ -50,7 +50,7 @@ This task needs files in the workspace before the agent starts, and the plain
 
 ## The LLM judges — this task shows all four scorers
 
-A judge API key in your `--env-file` (gemini picked first) turns the LLM judges on; each has an
+A judge API key in your `.env` (gemini picked first) turns the LLM judges on; each has an
 off switch (`--fixed-rubric no`, `--llm-rubric no`, `--adaptive-rubric no`).
 
 | scorer | rubric it reads | weight |

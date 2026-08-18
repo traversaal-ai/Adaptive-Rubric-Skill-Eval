@@ -98,7 +98,7 @@ class EvalRunner:
         self.rubrics_root = rubrics_root
         self.reporter = reporter  # None → no live tracking; guarded at every emit
         self.grade = grade
-        # Judge API keys (from --env-file), handed ONLY to the llm_rubric grader — which runs on the
+        # Judge API keys (from .env), handed ONLY to the llm_rubric grader — which runs on the
         # host. They never enter the sandbox and never reach the agent or third-party check scripts.
         self.judge_env = dict(judge_env or {})
 
@@ -508,7 +508,7 @@ class EvalRunner:
                 + list(spec.workspace_map.values()),
             },
             "skills": [Path(p).name for p in spec.skill_paths],
-            # False = the skills above existed but were deliberately withheld (--inject-skills no).
+            # False = the skills above existed but were deliberately withheld (--inject-skills no-skill).
             # Without this line a control run is indistinguishable from a task that has no skills.
             "skills_injected": spec.inject_skills,
             "grading": {
