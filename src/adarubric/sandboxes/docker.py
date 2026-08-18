@@ -63,7 +63,8 @@ def _raise_docker_failure(label: str, res: ShellResult) -> None:
     if _is_daemon_down(detail):
         raise SandboxUnavailable(
             f"Docker stopped responding during {label} - the daemon went away mid-run. "
-            "Start Docker Desktop and re-run."
+            "Start Docker again (Docker Desktop, or `sudo systemctl start docker` on Linux) "
+            "and re-run."
         )
     raise RuntimeError(f"{label} failed:\n{detail[-3000:]}")
 
@@ -92,7 +93,8 @@ def _docker(*args: str, input_text: str | None = None, timeout: int = 1800) -> S
         )
     except FileNotFoundError as exc:  # docker CLI not installed — our environment, not the agent's
         raise SandboxUnavailable(
-            "Docker CLI not found on PATH. Install Docker Desktop (or use --sandbox local)."
+            "Docker CLI not found on PATH. Install Docker (Docker Desktop on Windows/Mac, "
+                "the docker package on Linux) - or use --sandbox local."
         ) from exc
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"docker {' '.join(args[:2])} timed out") from exc
@@ -125,7 +127,8 @@ class DockerSandbox(Sandbox):
             return stream_run(["docker", *args], echo=self._log, timeout=timeout)
         except FileNotFoundError as exc:  # same classification as _docker
             raise SandboxUnavailable(
-                "Docker CLI not found on PATH. Install Docker Desktop (or use --sandbox local)."
+                "Docker CLI not found on PATH. Install Docker (Docker Desktop on Windows/Mac, "
+                "the docker package on Linux) - or use --sandbox local."
             ) from exc
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"docker {' '.join(args[:2])} timed out") from exc
@@ -146,8 +149,9 @@ class DockerSandbox(Sandbox):
         detail = (res.stderr or res.stdout or "").strip()
         if _is_daemon_down(detail) or not detail:
             raise SandboxUnavailable(
-                "Docker isn't running - can't reach the daemon. Start Docker Desktop, wait until it "
-                "reports running, then re-run. (Or use --sandbox local, which needs no Docker.)"
+                "Docker isn't running - can't reach the daemon. Start it (Docker Desktop on "
+                "Windows/Mac; `sudo systemctl start docker` on Linux), then re-run. "
+                "(Or run with --local, which needs no Docker.)"
             )
         raise SandboxUnavailable(f"Docker is not usable: {detail[-500:]}")
 

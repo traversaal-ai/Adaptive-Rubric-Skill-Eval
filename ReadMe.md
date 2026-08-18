@@ -27,6 +27,23 @@ uv pip install -e ".[dev]"
 
 Optional sanity check (free — no keys, no Docker): `uv run pytest`. All pass, 1 skipped.
 
+Install Docker and have it running — every run happens in a container by default (the agent's CLI
+is installed inside it automatically, so there is nothing else to set up). On Linux:
+`sudo apt install docker.io` and add yourself to the docker group.
+
+Prefer running on your own machine instead? That's `--local`, and only then do you need the
+agent's own CLI installed (they're separate programs — pip can't install them; any one is enough):
+
+```bash
+npm install -g @google/gemini-cli            # gemini-cli
+npm install -g @anthropic-ai/claude-code     # claude-code
+npm install -g @openai/codex                 # codex
+```
+
+`--harness acp` has no CLI of its own — it drives whatever agent you name in `--acp-cmd`
+(e.g. `gemini --acp`), so install *that* agent's CLI for `--local`, or pass
+`--acp-install <harness-name>` for docker runs.
+
 ## 2. Keys
 
 Copy [`.env.example`](.env.example) to `.env` in the project root, fill in what you have. One
@@ -52,9 +69,14 @@ uv run adarubric eval tasks/fix-logging --skill      # with the skill
 uv run adarubric eval tasks/fix-logging --no-skill   # without it
 ```
 
-That's the whole command. Everything else (which agent, how many trials, which judges) is already
-set in the task's `adarubric.yaml`; flags to override it for one run are in
-the [CLI](#cli) section further down, and you can ignore them until you need them.
+That's the whole command. It runs **in Docker by default** — one fresh container per run, agent
+CLI installed inside it, your machine untouched; just have Docker running (the first run builds
+the image, a few minutes; later runs reuse it). Add `--local` to run on your own machine instead
+(needs the agent's CLI from step 1).
+
+Everything else (which agent, how many trials, which judges) is already set in the task's
+`adarubric.yaml`; flags to override it for one run are in the [CLI](#cli) section further down,
+and you can ignore them until you need them.
 
 The terminal shows everything live while it runs — docker building, files being copied, the
 agent's own output line by line, and each judge's score the moment it lands. No flag needed.
@@ -89,13 +111,13 @@ uv run adarubric check dataset/skillsbench/tasks/flood-risk-analysis   # FREE he
 uv run adarubric init dataset/skillsbench/tasks/flood-risk-analysis
 # creates tasks/flood-risk-analysis/adarubric.yaml (knobs; source: points at the dataset)
 #     and rubrics/flood-risk-analysis/{static.md, adaptive.json}  ← read/edit these
-uv run adarubric eval tasks/flood-risk-analysis --harness gemini-cli --sandbox docker
+uv run adarubric eval tasks/flood-risk-analysis --harness gemini-cli
 ```
 
 **Automatic way:** run the dataset path directly — the same rubric files appear on first run:
 
 ```bash
-uv run adarubric eval dataset/skillsbench/tasks/flood-risk-analysis --harness claude-code --sandbox docker
+uv run adarubric eval dataset/skillsbench/tasks/flood-risk-analysis --harness claude-code
 ```
 
 ## 6. Make your own task
@@ -231,7 +253,8 @@ Precedence everywhere: **flag > yaml > built-in default.**
 | Flag | Default | Meaning |
 |---|---|---|
 | `--harness` | yaml `defaults.agent` | `claude-code` \| `gemini-cli` \| `codex` \| `acp` \| `oracle` \| `claude-code-together` \| `codex-together` (Beta). Comma-separate for several; pin models with `name:model`. |
-| `--sandbox` | `local` | `local` or `docker` (docker required for SkillsBench) |
+| `--sandbox` | `docker` | `docker` (isolated container, CLI auto-installed) or `local` |
+| `--local` | off | shortcut for `--sandbox local`: run on this machine — needs the agent's CLI installed |
 | `--trials` | yaml, else 1 | repeats per launch |
 | `--timeout` | yaml, else 300 | seconds per agent run |
 | `--model` | agent's own | one model for all harnesses (required for `*-together`: a Together model id) |

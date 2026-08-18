@@ -49,7 +49,12 @@ def run(
         "adarubric.yaml sets defaults.agent — this flag overrides it.",
     ),
     sandbox: str = typer.Option(
-        "local", "--sandbox", help="Where to run: local | docker."
+        "docker", "--sandbox", help="Where to run: docker (default) | local."
+    ),
+    local: bool = typer.Option(
+        False, "--local",
+        help="Shortcut for --sandbox local: run on THIS machine instead of a container. Needs the "
+        "agent's CLI installed here. The docker default needs no CLI install and is isolated.",
     ),
     model: str = typer.Option(
         None, "--model",
@@ -177,6 +182,9 @@ def run(
     from adarubric.sandboxes.registry import create_sandbox
 
     file_env = _root_env()   # ./.env, automatically - see _root_env
+
+    if local:  # --local is just the short spelling; everything downstream reads `sandbox`
+        sandbox = "local"
 
     spec = load_spec(path, instruction, task=task)
 
@@ -357,6 +365,14 @@ def run(
                 fg="red",
             )
             raise typer.Exit(code=1)
+        # Fail fast if a LOCAL run's agent CLI isn't on this machine. These are other vendors'
+        # programs (Node/binary), so pip can't install them for us — but we can refuse clearly NOW
+        # instead of recording a failed trial that just says "gemini: not found".
+        if sandbox == "local":
+            problem = _cli_missing_locally(h, hname)
+            if problem:
+                typer.secho(problem, fg="red")
+                raise typer.Exit(code=1)
 
         sb = create_sandbox(sandbox)
         sb.activity = _live_activity  # sandbox milestones → terminal + dashboard feed
@@ -875,6 +891,35 @@ def recompute(
 #: Command words that wrap the real agent rather than being it — skipped when labelling an ACP run.
 _ACP_WRAPPERS = {"npx", "node", "npm", "bunx", "bun", "deno", "uv", "uvx", "run", "python", "python3",
                  "sh", "bash", "-y", "--yes", "exec", "pipx"}
+
+
+def _cli_missing_locally(h, hname: str) -> str | None:
+    """A local run launches the agent's CLI on THIS machine — if it isn't installed, say so now
+    with the install command, instead of after a recorded failed trial. None = all good.
+
+    Docker runs never hit this: the CLI is installed inside the image automatically. The oracle
+    (a script, no CLI) and the generic acp harness (its command comes from --acp-cmd) are skipped.
+    """
+    import shutil
+
+    if getattr(h, "runs_oracle", False) or hname == "acp" or not h.cli:
+        return None
+    if shutil.which(h.cli):
+        return None
+    hints = {
+        "gemini": "npm install -g @google/gemini-cli",
+        "claude": "npm install -g @anthropic-ai/claude-code",
+        "codex": "npm install -g @openai/codex",
+        "tclaude": "curl -fsSL https://togetherlink.vercel.app/install.sh | sh",
+        "tcodex": "curl -fsSL https://togetherlink.vercel.app/install.sh | sh",
+    }
+    hint = hints.get(h.cli)
+    return (
+        f"The '{h.cli}' command isn't installed on this machine, so a --local run can't start.\n"
+        + (f"Install it:   {hint}\n" if hint else "Install the agent's CLI first.\n")
+        + "Or drop --local and run in docker (the default) - the container gets the CLI "
+        "installed automatically."
+    )
 
 
 def _acp_label(command: str) -> str:
