@@ -8,8 +8,10 @@
 #  copy .env.example to .env first.)
 #
 # Each line below is one task run. Edit the list: change harnesses, add
-# --trials 3, add tasks, comment lines out with '#'. A failing task does NOT
-# stop the rest, and every run shows up on the dashboard as usual:
+# --trials 3, add tasks, comment lines out with '#'. Every run shows its
+# full live output (docker build, the agent working, each judge's score).
+# A failing task does NOT stop the rest, and every run also lands on the
+# dashboard as usual:
 #
 #     python dashboard/serve.py        ->  http://127.0.0.1:8765
 # =============================================================================
@@ -32,7 +34,7 @@ run eval tasks/fix-logging
 
 # 3) The control run — same task, skill WITHHELD. The reward gap vs run 1
 #    is what the skill is worth:
-# run eval tasks/fix-logging --inject-skills no-skill
+# run eval tasks/fix-logging --no-skill
 
 # 4) A SkillsBench task (needs Docker + the dataset cloned, see README step 5).
 #    Health-check it for free first, then run it:

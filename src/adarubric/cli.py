@@ -121,12 +121,12 @@ def run(
         None, "--adaptive-model",
         help="Model for the adaptive rubric's generator and judge (default: the provider's default).",
     ),
-    inject_skills: str = typer.Option(
-        None, "--inject-skills",
-        help="Which of the two conditions to run: skill | no-skill. 'no-skill' runs the SAME "
-        "task with the guidance withheld — the control half of 'did the skill actually help?'. "
-        "Default: the yaml's inject_skills (else skill); this flag overrides for one run. Either "
-        "way the run records which skills existed.",
+    inject_skills: bool = typer.Option(
+        None, "--skill/--no-skill",
+        help="Which of the two conditions to run. --skill gives the agent the task's skills; "
+        "--no-skill runs the SAME task with that guidance withheld — the control half of 'did the "
+        "skill actually help?'. Neither flag: the yaml's inject_skills (else --skill). Either way "
+        "the run records which skills existed.",
     ),
     acp_cmd: str = typer.Option(
         None, "--acp-cmd",
@@ -193,8 +193,8 @@ def run(
     # Each entry is "name" or "name:model"; a per-harness model overrides the global --model.
     harness_specs = _parse_harness_specs(harness, model)
 
-    if inject_skills is not None:  # flag > yaml's inject_skills > default yes
-        spec.inject_skills = _parse_skill_mode(inject_skills)
+    if inject_skills is not None:  # --skill/--no-skill > yaml's inject_skills > default on
+        spec.inject_skills = inject_skills
     # Judge switches: CLI flag (when passed) > the yaml's grading: block > default on.
     if llm_rubric is not None:
         spec.run_llm_rubric = _parse_bool_flag(llm_rubric, "--llm-rubric")
@@ -207,7 +207,7 @@ def run(
     if not spec.inject_skills:
         withheld = ", ".join(os.path.basename(p) for p in spec.skill_paths) or "none"
         typer.secho(
-            f"--inject-skills no-skill: withholding {withheld}. This is the CONTROL run — compare its "
+            f"--no-skill: withholding {withheld}. This is the CONTROL run — compare its "
             f"reward against a normal run to see what the skill is worth.", fg="yellow",
         )
 
@@ -286,7 +286,30 @@ def run(
     import os as _os
     status_path = _os.path.join(output, "status.json")
     status = StatusReporter(status_path)
-    reporter = FanReporter(TerminalReporter(), status)
+    term = TerminalReporter()
+    reporter = FanReporter(term, status)
+
+    # Everything shows live, always — that's the default, no switch. Milestone lines (image built,
+    # skills injected, judge running…) go to the terminal AND the dashboard feed. Raw output (docker
+    # build lines, the agent's own stream) is high-volume, so it goes to the terminal only — with
+    # key values scrubbed first, the same rule the transcript follows.
+    # Only values that are actually secrets (KEY/TOKEN/SECRET in the name). Scrubbing every .env
+    # value blanked harmless words too — JUDGE_LLM_PROVIDER=gemini turned the path ".gemini" into
+    # ".[REDACTED]" on screen.
+    _SECRETY = ("KEY", "TOKEN", "SECRET")
+    _secrets = [v for k, v in file_env.items()
+                if v and len(v) > 5 and any(t in k.upper() for t in _SECRETY)]
+    _secrets += [v for k in judge_keys
+                 if any(t in k for t in _SECRETY) and (v := os.environ.get(k)) and len(v) > 5]
+
+    def _live_activity(msg: str) -> None:
+        status.note(msg)
+        term.note(msg)
+
+    def _live_raw(line: str) -> None:
+        for s in _secrets:
+            line = line.replace(s, "[REDACTED]")
+        term.note(line)
     typer.echo(
         f"live status -> {status_path}  (live dashboard: python dashboard/serve.py --output {output})"
     )
@@ -336,13 +359,15 @@ def run(
             raise typer.Exit(code=1)
 
         sb = create_sandbox(sandbox)
-        sb.activity = status.note  # sandbox reports build/copy/exec steps into the live feed
+        sb.activity = _live_activity  # sandbox milestones → terminal + dashboard feed
+        sb.log = _live_raw   # raw docker build / agent output lines, streamed live
+        h.echo = _live_raw   # ACP agents narrate their tool calls / messages through this
         if hname == "acp":
             # Hand the harness the sandbox's interactive launcher: a local process, or `docker exec -i`
             # into the container. Same ACP conversation either way — this is what unlocks docker.
             h.spawn = sb.popen
         runner = EvalRunner(sb, output_root=output, reporter=reporter, grade=grade,
-                            judge_env=judge_env)
+                            judge_env=judge_env, echo=_live_activity)
         # Inject ONLY this harness's declared key(s) from the file into the sandbox.
         harness_env = {k: file_env[k] for k in h.env_keys if k in file_env}
         if hname == "acp":
@@ -436,8 +461,11 @@ def check(
 
     typer.echo(f"checking task={spec.name}  sandbox={sandbox}  (reference solution, no model, free)")
     harness = create_harness("oracle")
-    runner = EvalRunner(create_sandbox(sandbox), output_root=output,
-                        reporter=TerminalReporter(), grade=True)
+    term = TerminalReporter()
+    sb = create_sandbox(sandbox)
+    sb.activity = term.note  # milestones (build steps, staging) live on the terminal — always
+    sb.log = term.note       # raw docker build / solve.sh output, streamed line by line
+    runner = EvalRunner(sb, output_root=output, reporter=term, grade=True, echo=term.note)
     report = runner.run(harness, spec, trials=1, env={})
     trial = report.trials[0]
     meta = trial.meta
@@ -617,7 +645,7 @@ def _generate_rubrics(spec, env: dict, ref_dir, want_static: bool, want_adaptive
 def _grading_block(static_val: str, adaptive_val: str, fixed_val: str = "yes") -> str:
     return (
         "\n# Run the control condition (skill withheld) with `inject_skills: no`;"
-        "\n# --inject-skills overrides for one run."
+        "\n# --skill/--no-skill overrides for one run."
         "\n# inject_skills: no"
         "\n"
         "\n# Which LLM judges run (yes | no | a rubric file path). This yaml is the source of"
@@ -872,23 +900,6 @@ def _acp_label(command: str) -> str:
 
 _TRUE = {"yes", "y", "true", "t", "1", "on"}
 _FALSE = {"no", "n", "false", "f", "0", "off"}
-
-
-def _parse_skill_mode(value: str) -> bool:
-    """``--inject-skills skill | no-skill`` -> inject or withhold.
-
-    Named after the two conditions this benchmark compares, not yes/no: the word you type is the
-    experiment you ran, so a half-remembered flag can't quietly produce the wrong one.
-    """
-    v = (value or "").strip().lower().replace("_", "-")
-    if v == "skill":
-        return True
-    if v == "no-skill":
-        return False
-    typer.secho(
-        f"--inject-skills expects skill or no-skill — got '{value}'.", fg="red"
-    )
-    raise typer.Exit(code=1)
 
 
 def _parse_bool_flag(value: str, flag: str) -> bool:

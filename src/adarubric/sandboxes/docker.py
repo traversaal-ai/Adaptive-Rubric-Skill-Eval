@@ -111,6 +111,25 @@ class DockerSandbox(Sandbox):
         self._workdirs: dict[str, str] = {}  # container id -> workdir
         self._lock = threading.Lock()
 
+    def _docker_live(self, *args: str, timeout: int = 1800) -> ShellResult:
+        """``_docker``, but when a verbose sink is attached every output line streams to it live.
+
+        Used ONLY for the long, otherwise-silent operations (image builds, the agent's exec):
+        the chatter of mkdirs/snapshots stays on the quiet path either way.
+        """
+        if self.log is None:
+            return _docker(*args, timeout=timeout)
+        from adarubric.sandboxes.streaming import stream_run
+
+        try:
+            return stream_run(["docker", *args], echo=self._log, timeout=timeout)
+        except FileNotFoundError as exc:  # same classification as _docker
+            raise SandboxUnavailable(
+                "Docker CLI not found on PATH. Install Docker Desktop (or use --sandbox local)."
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"docker {' '.join(args[:2])} timed out") from exc
+
     # ------------------------------------------------------------------ preflight
 
     def preflight(self) -> None:
@@ -145,7 +164,7 @@ class DockerSandbox(Sandbox):
             base_tag = f"adarubric/{_slug(spec.name)}:task"
             context = str(Path(spec.dockerfile).parent)  # environment/ — COPY paths resolve here
             self._note(f"building task image from {spec.dockerfile} (this can take a few minutes)…")
-            res = _docker("build", "-t", base_tag, "-f", spec.dockerfile, context)
+            res = self._docker_live("build", "-t", base_tag, "-f", spec.dockerfile, context)
             if res.exit_code != 0:
                 _raise_docker_failure("docker build (task)", res)
         else:
@@ -179,11 +198,10 @@ class DockerSandbox(Sandbox):
             self._images[key] = tag
         return tag
 
-    @staticmethod
-    def _build_synth(tag: str, dockerfile_text: str) -> ShellResult:
+    def _build_synth(self, tag: str, dockerfile_text: str) -> ShellResult:
         with tempfile.TemporaryDirectory(prefix="adarubric-ctx-") as ctx:
             (Path(ctx) / "Dockerfile").write_text(dockerfile_text, encoding="utf-8")
-            return _docker("build", "-t", tag, ctx)
+            return self._docker_live("build", "-t", tag, ctx)
 
     # ------------------------------------------------------------------ per-attempt
 
@@ -232,7 +250,7 @@ class DockerSandbox(Sandbox):
         # (SkillsBench-faithful: /root/.claude/skills etc; cwd-independent).
         if not spec.inject_skills:
             withheld = ", ".join(Path(p).name for p in spec.skill_paths) or "none"
-            self._note(f"skills NOT injected (--inject-skills no-skill) — withheld: {withheld}")
+            self._note(f"skills NOT injected (--no-skill) — withheld: {withheld}")
         for d in harness.skill_dirs if spec.inject_skills else ():
             base = f"{_HOME}/{d}"
             _docker("exec", cid, "sh", "-c", f"mkdir -p '{base}'")
@@ -253,7 +271,7 @@ class DockerSandbox(Sandbox):
         for k, v in (env or {}).items():
             args += ["-e", f"{k}={v}"]
         args += ["-w", self._workdirs.get(workspace, _GENERIC_WORKDIR), workspace, "sh", "-lc", command]
-        return _docker(*args, timeout=3600)
+        return self._docker_live(*args, timeout=3600)
 
     # ------------------------------------------------------------------ capture
 

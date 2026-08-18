@@ -123,7 +123,7 @@ Sources: claude-code and codex from SkillsBench's source audit
 
 **Skills are copied in at container start — never baked into the image.** SkillsBench's own review
 checklist calls baking an antipattern, for a good reason: if the skill is in the image, a
-`--inject-skills no-skill` control run would still see it, and the comparison would be worthless.
+`--no-skill` control run would still see it, and the comparison would be worthless.
 
 Control files (`grader.yaml`, `adarubric.yaml`, `TASK.md`, `eval.yaml`) are **stripped from the copy**,
 so an agent can never read its own marking scheme out of a skill folder.
@@ -350,7 +350,7 @@ The number that answers "is this skill any good?" isn't one run — it's the gap
 
 ```bash
 uv run adarubric eval <task> --harness codex --sandbox docker                      # with
-uv run adarubric eval <task> --harness codex --inject-skills no-skill --sandbox docker   # without
+uv run adarubric eval <task> --harness codex --no-skill --sandbox docker   # without
 ```
 
 Both runs record which skills existed and whether they were injected (`skills_injected`), so the pair

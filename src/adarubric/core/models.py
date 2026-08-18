@@ -216,7 +216,7 @@ class RunMeta:
     #: itself still happened and is still scored, because the grader reads the live container, not
     #: the export. A failed copy must never discard a completed run.
     export_error: str | None = None
-    #: False when ``--inject-skills no-skill`` withheld the task's skills. Essential context for the score:
+    #: False when ``--no-skill`` withheld the task's skills. Essential context for the score:
     #: a low reward means something completely different depending on whether the agent was given the
     #: guidance. Comparing the two conditions is what measures a skill's worth.
     skills_injected: bool = True
@@ -334,7 +334,7 @@ class EvalSpec:
     name: str
     instruction: str
     skill_paths: list[str] = field(default_factory=list)  # skill dirs to inject
-    #: Whether to actually place those skills where the agent can find them. ``--inject-skills no-skill``
+    #: Whether to actually place those skills where the agent can find them. ``--no-skill``
     #: sets this False to run the SAME task with the guidance withheld, which is the control half of
     #: "did the skill help?". ``skill_paths`` is deliberately left populated so the record still shows
     #: WHICH skills were withheld — a no-skill run must not look like a task that has no skills.

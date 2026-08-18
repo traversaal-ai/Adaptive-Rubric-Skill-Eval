@@ -90,6 +90,7 @@ class EvalRunner:
         grade: bool = True,
         judge_env: dict[str, str] | None = None,
         rubrics_root: str = "rubrics",
+        echo: Callable[[str], None] | None = None,
     ) -> None:
         self.sandbox = sandbox
         self.output_root = output_root
@@ -101,6 +102,17 @@ class EvalRunner:
         # Judge API keys (from .env), handed ONLY to the llm_rubric grader — which runs on the
         # host. They never enter the sandbox and never reach the agent or third-party check scripts.
         self.judge_env = dict(judge_env or {})
+        #: Live activity sink: grading progress lines (which grader is running, each score as it
+        #: lands). The CLI routes it to the dashboard feed, plus the terminal under --verbose —
+        #: grading is several slow LLM calls, the longest otherwise-silent stretch of a run.
+        self.echo = echo
+
+    def _say(self, msg: str) -> None:
+        if self.echo is not None:
+            try:
+                self.echo(msg)
+            except Exception:  # noqa: BLE001 - the live view must never break a run
+                pass
 
     # ------------------------------------------------------------------ public
 
@@ -293,6 +305,10 @@ class EvalRunner:
                 if self.grade and specs:
                     self._emit("stage_changed", harness.name, _safe(spec.name), attempt, TrialStage.GRADING, trial=trial_id)
                     for gs in specs:
+                        self._say(f"grading: {_grader_label(gs.type)} running…"
+                                  + (" (an LLM call — can take a minute)"
+                                     if gs.type in ("llm_rubric", "fixed_rubric", "adaptive_rubric")
+                                     else ""))
                         # The judge's keys go to the JUDGE graders only (they call out from the
                         # host); deterministic checks run inside the sandbox and must not see them.
                         genv = ({**run_env, **self.judge_env}
@@ -316,6 +332,12 @@ class EvalRunner:
                             result = GraderResult(
                                 gs.type, 0.0, gs.weight, f"grader error: {gexc}",
                                 error=f"grader crashed: {gexc}")
+                        if result.error:
+                            self._say(f"grading: {_grader_label(gs.type)} FAILED — {result.error[:200]}")
+                        else:
+                            self._say(f"grading: {_grader_label(gs.type)} → score {result.score:.2f}"
+                                      + (" (weight 0 — shown, not blended into the reward)"
+                                         if gs.weight == 0 else ""))
                         grader_results.append(result)
                         # Each verdict joins the transcript, so a later llm_rubric judge sees the
                         # deterministic checks' results — same evidence skillgrade's judge gets.
@@ -434,6 +456,9 @@ class EvalRunner:
             # can't run, the built-in DEFAULT_RUBRIC steps in (rubric=None → grader default).
             # A path in the yaml's grading block supplies the text directly; else the rubrics/
             # cache (or a fresh generation) does.
+            if not spec.static_rubric_text:
+                self._say(f"static rubric: {self.rubrics_root}/<task>/static.md "
+                          "(generated now if this is the task's first run — one LLM call)")
             rubric = spec.static_rubric_text or generated_task_rubric(
                 spec, env, self.rubrics_root, provider=jp, model=jm,
                 legacy_root=str(Path(self.output_root) / "rubrics"))
@@ -457,6 +482,8 @@ class EvalRunner:
             if spec.adaptive_criteria_json:
                 criteria_json: str | None = spec.adaptive_criteria_json
             else:
+                self._say(f"adaptive rubric: {self.rubrics_root}/<task>/adaptive.json "
+                          "(generated now if this is the task's first run — one LLM call)")
                 criteria = generated_adaptive_rubric(
                     spec, env, self.rubrics_root,
                     provider=ap, model=am,
@@ -508,7 +535,7 @@ class EvalRunner:
                 + list(spec.workspace_map.values()),
             },
             "skills": [Path(p).name for p in spec.skill_paths],
-            # False = the skills above existed but were deliberately withheld (--inject-skills no-skill).
+            # False = the skills above existed but were deliberately withheld (--no-skill).
             # Without this line a control run is indistinguishable from a task that has no skills.
             "skills_injected": spec.inject_skills,
             "grading": {
@@ -606,6 +633,17 @@ class EvalRunner:
         self.reporter.emit(ProgressEvent(
             type=type_, timestamp=_now(), harness=harness_name, task=task, attempt=attempt,
             trial=trial, stage=stage, reward=reward, meta=meta))
+
+
+def _grader_label(gtype: str) -> str:
+    """Plain-language name for a grader in live progress lines."""
+    return {
+        "deterministic": "script checks",
+        "skillbench_verifier": "the task's verifier",
+        "llm_rubric": "static judge (task rubric)",
+        "fixed_rubric": "fixed judge (same rubric for every task)",
+        "adaptive_rubric": "adaptive judge (4 task-specific tests)",
+    }.get(gtype, gtype)
 
 
 def _weighted(results: list[GraderResult]) -> float:

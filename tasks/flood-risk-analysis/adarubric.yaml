@@ -10,7 +10,7 @@ defaults:
 timeout: 300
 
 # Run the control condition (skill withheld) with `inject_skills: no`;
-# --inject-skills overrides for one run.
+# --skill/--no-skill overrides for one run.
 # inject_skills: no
 
 # Which LLM judges run (yes | no | a rubric file path). This yaml is the source of

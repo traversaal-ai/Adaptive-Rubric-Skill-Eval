@@ -82,6 +82,10 @@ class Harness(ABC):
     #: Shell snippet that installs this harness's CLI inside a (debian-based) docker image.
     #: Used by the DockerSandbox overlay build. Empty → nothing to install (e.g. test doubles).
     docker_install: str = ""
+    #: Optional live-narration sink, set by the CLI in ``--verbose`` mode. Harnesses that watch the
+    #: agent act in real time (ACP) report tool calls / messages here as they happen; subprocess
+    #: harnesses don't need it — their CLI's output is streamed live by the sandbox instead.
+    echo: "Callable[[str], None] | None" = None
 
     def __init__(self, model: str | None = None) -> None:
         #: Instance-level model pin (overrides the class default) — ``None`` keeps the CLI default.
@@ -105,6 +109,11 @@ class Sandbox(ABC):
     #: live dashboard. ``None`` → a no-op; the sandbox never depends on it being set.
     activity: "Callable[[str], None] | None" = None
 
+    #: Optional RAW-output sink (``--verbose``): full docker build / agent CLI output, streamed live
+    #: line by line. Separate from ``activity`` (milestones) because it is high-volume — it goes to
+    #: the terminal only, never into status.json (which is rewritten on every activity line).
+    log: "Callable[[str], None] | None" = None
+
     def _note(self, msg: str) -> None:
         """Emit a live activity line if a sink is attached (safe no-op otherwise)."""
         cb = self.activity
@@ -112,6 +121,15 @@ class Sandbox(ABC):
             try:
                 cb(msg)
             except Exception:  # noqa: BLE001 - activity reporting must never break a run
+                pass
+
+    def _log(self, line: str) -> None:
+        """Emit one raw output line to the verbose sink (safe no-op when none is attached)."""
+        cb = self.log
+        if cb is not None and line:
+            try:
+                cb(line)
+            except Exception:  # noqa: BLE001 - the live view must never break a run
                 pass
 
     def preflight(self) -> None:

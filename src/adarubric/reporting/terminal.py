@@ -18,6 +18,16 @@ class TerminalReporter(ProgressReporter):
     def __init__(self) -> None:
         self._lock = threading.Lock()
 
+    def note(self, msg: str) -> None:
+        """One live activity/log line (--verbose), indented under the current stage dot.
+
+        Thread-safe: docker build output, the agent's stdout and stderr, and grading notes all
+        arrive from different threads and must not interleave mid-line.
+        """
+        with self._lock:
+            for line in (str(msg).splitlines() or [""]):
+                typer.secho(f"      | {line}", dim=True)
+
     def emit(self, event: ProgressEvent) -> None:
         with self._lock:
             label = f"{event.harness}/{event.task} a{event.attempt}"

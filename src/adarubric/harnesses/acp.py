@@ -205,7 +205,8 @@ class AcpHarness(Harness):
         # workspace is not on this filesystem, so those requests are served through the sandbox shell.
         files: _Files = _HostFiles(session_cwd) if local else _SandboxFiles(run_command)
         conn = AcpConnection(proc, session_cwd, files=files,
-                             auth_env_names=set(self.launch_env or ()) | set(self.env_keys or ()))
+                             auth_env_names=set(self.launch_env or ()) | set(self.env_keys or ()),
+                             echo=self.echo)
         try:
             return conn.run_prompt(instruction)
         except Exception as exc:  # noqa: BLE001 - see below
@@ -242,13 +243,21 @@ class AcpHarness(Harness):
 class AcpConnection:
     """A minimal JSON-RPC 2.0 client speaking ACP to a subprocess over newline-delimited stdio."""
 
+    #: Class-level default so paths that build the connection via ``__new__`` (replay_wire_log)
+    #: stay silent instead of crashing on a missing attribute.
+    _echo_cb: "Callable[[str], None] | None" = None
+
     def __init__(
         self,
         proc: "subprocess.Popen[str]",
         cwd: str,
         files: _Files | None = None,
         auth_env_names: set[str] | None = None,
+        echo: "Callable[[str], None] | None" = None,
     ) -> None:
+        #: Live-narration sink (--verbose): the agent's tool calls and finished messages, as they
+        #: happen. ACP runs pump the agent through OUR pipes, so without this the run is silent.
+        self._echo_cb = echo
         #: The session's working directory as the AGENT sees it (a container path under docker).
         self.cwd = cwd
         self.proc = proc
@@ -432,6 +441,25 @@ class AcpConnection:
                 self._parse_errors.append(note)
                 del self._parse_errors[10:]
 
+    def _echo(self, msg: str) -> None:
+        """One live-narration line (--verbose); a safe no-op when no sink is attached."""
+        if self._echo_cb is not None and msg:
+            try:
+                self._echo_cb(msg)
+            except Exception:  # noqa: BLE001 - the live view must never break a run
+                pass
+
+    def _echo_text_block(self) -> None:
+        """Narrate the message the agent just FINISHED. Chunks are fragments (they split mid-word),
+        so live view waits for the block to close — a tool call, or the end of the run."""
+        if self._echo_cb is None or not (self._block_open and self._text):
+            return
+        text = self._text[-1].strip()
+        if len(text) > 600:
+            text = text[:600] + f" … [+{len(text) - 600} chars]"
+        if text:
+            self._echo(f"agent: {text}")
+
     def _dispatch_notification(self, msg: dict) -> None:
         if msg.get("method") != "session/update":
             return
@@ -453,12 +481,14 @@ class AcpConnection:
             # A tool the model asked for. Announced TWICE per call by claude-code-acp, which is why
             # the counter tracks ids in a set rather than counting notifications.
             self._replies.started(str(update.get("toolCallId") or ""))
+            self._echo_text_block()
             self._block_open = False
             self._record_tool_call(update)
         elif kind == "tool_call_update":
             # "completed" or "failed" — either way the model is invoked again afterwards.
             if str(update.get("status") or "") in ("completed", "failed"):
                 self._replies.finished(str(update.get("toolCallId") or ""))
+            self._echo_text_block()
             self._block_open = False
             self._record_tool_call(update)
         elif kind == "usage_update":
@@ -510,8 +540,11 @@ class AcpConnection:
             if call_id not in self._counted_calls:
                 self._counted_calls.add(call_id)
                 self._tools[name] = self._tools.get(name, 0) + 1
+                # Narrated once per call (not per progress update): the live view of the agent working.
+                self._echo(f"tool: {name}" + (f" — {title[:160]}" if title and title != name else ""))
         else:
             self._tools[name] = self._tools.get(name, 0) + 1
+            self._echo(f"tool: {name}" + (f" — {title[:160]}" if title and title != name else ""))
         # Skill evidence, in the order SkillsBench's own audit looks for it: a dedicated skill tool
         # (claude's "Launching skill: <name>"), a read under `.../skills/<name>/...`, or any SKILL.md.
         haystack = json.dumps(update) if update else ""
@@ -561,6 +594,7 @@ class AcpConnection:
             "sessionId": session_id,
             "prompt": [{"type": "text", "text": instruction}],
         })
+        self._echo_text_block()  # the agent's closing message never hits a tool call to flush it
 
         stop = result.get("stopReason")
         error = None

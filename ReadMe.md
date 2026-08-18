@@ -48,13 +48,16 @@ Two runs. The first gives the agent the skill, the second withholds it. That pai
 measurement — the gap between the two scores is what the skill was worth.
 
 ```bash
-uv run adarubric eval tasks/fix-logging                            # with the skill
-uv run adarubric eval tasks/fix-logging --inject-skills no-skill   # without it
+uv run adarubric eval tasks/fix-logging --skill      # with the skill
+uv run adarubric eval tasks/fix-logging --no-skill   # without it
 ```
 
 That's the whole command. Everything else (which agent, how many trials, which judges) is already
 set in the task's `adarubric.yaml`; flags to override it for one run are in
 the [CLI](#cli) section further down, and you can ignore them until you need them.
+
+The terminal shows everything live while it runs — docker building, files being copied, the
+agent's own output line by line, and each judge's score the moment it lands. No flag needed.
 
 Several runs in one go? [`run_tasks.sh`](run_tasks.sh) is a ready-made, commented list of runs —
 edit it and `bash run_tasks.sh` (Windows: from Git Bash). A failing task never stops the rest.
@@ -142,7 +145,7 @@ Tasks run one by one; a failing one never stops the rest; everything lands on th
 - Put each skill in its own folder: `skills/<name>/SKILL.md`.
 - Edit anything in `rubrics/` — your text is used as-is, never regenerated.
 - Name output files in the instruction if your grader checks them.
-- Use `--inject-skills no-skill` runs as the control; the reward gap is what the skill is worth.
+- Use `--no-skill` runs as the control; the reward gap is what the skill is worth.
 
 **Don't**
 - Don't put a root `SKILL.md` next to other files — the whole folder becomes the skill and ships
@@ -183,7 +186,7 @@ timeout: 300
 docker:                        # only for --sandbox docker on your own tasks
   base: python:3.12-slim
   setup: pip install pandas
-inject_skills: no              # control condition; --inject-skills overrides
+inject_skills: no              # control condition; --skill/--no-skill overrides
 graders:
   - type: deterministic
     run: python graders/check.py
@@ -231,7 +234,7 @@ Precedence everywhere: **flag > yaml > built-in default.**
 | `--trials` | yaml, else 1 | repeats per launch |
 | `--timeout` | yaml, else 300 | seconds per agent run |
 | `--model` | agent's own | one model for all harnesses (required for `*-together`: a Together model id) |
-| `--inject-skills` | yaml, else `skill` | `no-skill` = the control run, skill withheld |
+| `--skill` / `--no-skill` | yaml, else `--skill` | `--no-skill` = the control run, skill withheld |
 | `--fixed-rubric` / `--llm-rubric` / `--adaptive-rubric` | yaml, else yes | switch each judge for this run |
 | `--adaptive-provider` / `--adaptive-model` | judge env / defaults | adaptive's own LLM |
 | `--instruction` / `--task` / `--dataset` / `--output` / `--grade/--no-grade` | — | as named |

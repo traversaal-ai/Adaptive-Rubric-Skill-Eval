@@ -214,7 +214,7 @@ def _load_config(d: Path, cfg_path: Path, instruction: str | None, task: str | N
 
 def _apply_inject_skills(spec: EvalSpec, raw: dict, defaults: dict, task_def: dict | None = None) -> None:
     """``inject_skills: no`` in the yaml runs the task as the CONTROL condition (skill withheld).
-    Same value the --inject-skills flag sets; the flag, when passed, wins for that run."""
+    Same value --skill/--no-skill sets; the flag, when passed, wins for that run."""
     for holder in ((task_def or {}), raw, defaults):
         value = holder.get("inject_skills")
         if value is not None:

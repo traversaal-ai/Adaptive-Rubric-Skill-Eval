@@ -130,7 +130,7 @@ tasks:
           echo '{{"score": 0.0, "details": "TODO: implement grader"}}'
         weight: 0.7
 
-# Run the control condition (skill withheld) by setting this to no; --inject-skills overrides.
+# Run the control condition (skill withheld) by setting this to no; --skill/--no-skill overrides.
 # inject_skills: no
 
 # Which LLM judges run (yes | no | a rubric file path). The yaml is the source of truth;
