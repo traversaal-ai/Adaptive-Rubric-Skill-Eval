@@ -191,7 +191,7 @@ Tasks run one by one; a failing one never stops the rest; everything lands on th
 | `tasks/` | you (or `init` drafts) | task definitions: yaml, skill, starting files, checks |
 | `rubrics/<task>/` | generated, yours to edit | `static.md` + `adaptive.json` — existing files are used as-is; delete to regenerate |
 | `rubrics/fixed.md` | ours by default, yours to edit | the ONE rubric judging every task the same way (the baseline) |
-| `output/` | AdaRubric | per run: `eval.yaml` receipt, `run.json`, `grading.json`, `rubric.md`, `transcript.json`, `changes.json`, `raw.log`, `workspace/` |
+| `output/` | AdaRubric | `attempt-N/eval.yaml` = the receipt (config + the instruction + the rubric the judge used), then per trial: `run.json`, `grading.json`, `transcript.json`, `changes.json`, `raw.log`, `workspace/` |
 | `dataset/` | SkillsBench | never written to |
 
 ## adarubric.yaml — every key
@@ -292,7 +292,8 @@ append-only history.
 
 - **`skill_opened`** true/false/null (null = the agent doesn't report enough — never guessed).
 - **`skill_depth`** — `used` (read past the front page) / `noticed` / `not_opened`. Only `used`
-  is real skill use. Gemini maxes out at `noticed` (it reports no file paths).
+  is real skill use. Every harness reports file paths (gemini via its stream-json trajectory;
+  a very old gemini CLI falls back to a summary mode that caps it at `noticed`).
 - **turns** — two columns: *we measured* (model replies, one definition for all agents) and
   *agent claims* (its own number; they disagree).
 - **grading failed ≠ 0.00** — a broken check is our problem and displays as such.

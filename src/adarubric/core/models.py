@@ -282,6 +282,10 @@ class Trial:
     graded: bool = False
     grader_results: list[GraderResult] = field(default_factory=list)
     output_dir: str | None = None  # output/<harness>/<task>/attempt-N/trial-M
+    #: The exact rubric text the LLM judge scored against, and where it came from. Carried up to
+    #: the attempt so it is recorded ONCE in eval.yaml instead of copied into every trial folder.
+    rubric_used: str | None = None
+    rubric_source: str | None = None
 
 
 @dataclass

@@ -1,0 +1,4 @@
+# Shell scripts must check out with LF endings on EVERY machine — bash cannot run a
+# CRLF file (a clone made with autocrlf=true broke run_tasks.sh with hidden \r errors).
+# This rule overrides any local autocrlf setting.
+*.sh text eol=lf

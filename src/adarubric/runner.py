@@ -3,9 +3,15 @@
 Vocabulary: an **attempt** is one launch of the command; a **trial** is one repetition inside it.
 Output layout:
     output/<harness>/<task>/attempt-<A>/
-        eval.yaml                     # the run definition (written BEFORE trials; host-only)
+        eval.yaml                     # THE receipt: config + instruction + the judge's rubric
         trial-<T>/
-            run.json transcript.json changes.json grading.json prompt.md raw.log workspace/
+            run.json transcript.json changes.json grading.json raw.log workspace/
+
+eval.yaml is the one place the run is defined: the resolved config (harness, environment, skills,
+grading, timeout), the instruction the agent was given, and the exact rubric the judge scored
+against. A trial folder holds only what that trial produced. Earlier versions also copied
+prompt.md and rubric.md into every trial folder; both duplicated eval.yaml, and two copies of a
+prompt only raise the question of which one was real.
 
 Per trial:
   resolve env keys → prepare (docker build) → setup → snapshot → harness.run (with timeout) →
@@ -159,6 +165,13 @@ class EvalRunner:
         observed = sorted({r.meta.model for r in results if r.meta.model})
         if observed:
             manifest["harness"]["model_observed"] = observed
+        # The exact rubric the judge scored against, recorded once for the whole attempt. Trials of
+        # one attempt share a rubric, so the first that resolved it speaks for all of them.
+        judged = next((r for r in results if r.rubric_used), None)
+        if judged is not None:
+            manifest["grading"]["llm_rubric"]["source"] = judged.rubric_source
+            manifest["grading"]["llm_rubric"]["rubric"] = judged.rubric_used
+        if observed or judged is not None:
             eval_yaml.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
 
         report = EvalReport(
@@ -414,19 +427,15 @@ class EvalRunner:
                         {"reward": reward if graded else None, "graded": graded,
                          "grading_error": grading_error,
                          "grader_results": [asdict(g) for g in grader_results]})
-        # The rubric the judge actually used, copied INTO the trial folder — a judge score whose
-        # rubric isn't saved next to it can't be audited, and the adaptive rubric (step 8) will
-        # write a different text per task into this same file.
-        if rubric_used is not None:
-            (out_dir / "rubric.md").write_text(
-                f"<!-- rubric used by the LLM judge · source: {rubric_source} -->\n\n{rubric_used}",
-                encoding="utf-8")
-        (out_dir / "prompt.md").write_text(redact(spec.instruction), encoding="utf-8")
+        # Neither the rubric nor the instruction is written here. Both go to the attempt's
+        # eval.yaml (see run()), so what the agent was asked and what the judge scored
+        # against sit in one file, once — not once per trial, in two more copies.
         (out_dir / "raw.log").write_text(raw, encoding="utf-8")
 
         trial = Trial(trial_id=trial_id, meta=meta, changes=changes, transcript=transcript,
                       raw_log=raw, reward=reward, graded=graded, grader_results=grader_results,
-                      output_dir=str(out_dir))
+                      output_dir=str(out_dir),
+                      rubric_used=rubric_used, rubric_source=rubric_source)
         self._emit("trial_finished", harness.name, _safe(spec.name), attempt, stage,
                    reward=(reward if graded else None), meta=meta, trial=trial_id)
         return trial
@@ -569,14 +578,12 @@ class EvalRunner:
                 "graders": [g.type for g in spec.graders],
                 # The judge, so the receipt shows BOTH scorers. "judge" is the provider that will
                 # be used (key name only, never the key); null = no key found, judge skipped.
+                # `source` and `rubric` are filled in AFTER the trials, from the rubric the
+                # judge actually used — not a guess about where one might come from.
+                # Absent = no judge ran (disabled, no key, or grading failed).
                 "llm_rubric": {
                     "enabled": spec.run_llm_rubric,
                     "judge": pick_provider(None, self.judge_env),
-                    "rubric_source": (
-                        "task's own" if any(g.type == "llm_rubric" for g in spec.graders)
-                        else "generated per task, cached in rubrics/<task>/ "
-                             "(fallback: built-in default)"
-                    ),
                 },
             },
             "timeout_sec": spec.timeout_sec,
@@ -594,7 +601,6 @@ class EvalRunner:
         out_dir.mkdir(parents=True, exist_ok=True)
         _write_json(out_dir / "run.json", asdict(meta))
         _write_json(out_dir / "transcript.json", [asdict(e) for e in transcript])
-        (out_dir / "prompt.md").write_text(spec.instruction, encoding="utf-8")
         trial = Trial(trial_id=trial_id, meta=meta, transcript=transcript, output_dir=str(out_dir))
         self._emit("trial_finished", harness.name, _safe(spec.name), attempt, TrialStage.FAILED,
                    trial=trial_id, meta=meta)
