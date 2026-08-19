@@ -326,6 +326,10 @@ class GraderSpec:
     #: True when WE added this grader (the default llm rubric), not the task's author. An auto
     #: grader that can't run is silently skipped; one the author asked for reports a grading error.
     auto: bool = False
+    #: ``enabled: no`` in the yaml — declared, deliberately NOT run. Kept in the list rather than
+    #: dropped at load time so the runner can tell "the author switched this off" from "the author
+    #: never mentioned it", which is the difference between skipping a judge and auto-adding one.
+    enabled: bool = True
 
 
 @dataclass

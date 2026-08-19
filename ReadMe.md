@@ -202,6 +202,8 @@ defaults:                      # flags override each for one run
   trials: 1                    # --trials
 instruction: |                 # required (or TASK.md, or --instruction)
   ...
+skills:                        # the skill(s) under test, declared visibly
+  - skills/my-skill            #   (omit to auto-detect in the usual folders)
 workspace:                     # files copied to the agent
   - file.txt                   #   lands at top, same name
   - src/a.csv:data/a.csv       #   src:dest keeps/changes the path
@@ -210,8 +212,9 @@ docker:                        # your own task's container recipe (ignored with 
   base: python:3.12-slim
   setup: pip install pandas
 inject_skills: no              # control condition; --skill/--no-skill overrides
-graders:                       # every scorer, one list: type + weight + the file it judges from
+graders:                       # every scorer, one list: type + include + weight + its file
   - type: deterministic         #   the script check — no rubric, it runs a command
+    include: yes                #   include: no = switched off entirely (works on any scorer)
     run: python graders/check.py
     weight: 0.7
   - type: llm_rubric            #   the STATIC judge: this task's rubric
@@ -227,8 +230,9 @@ grading:                       # OR declare no judges above and switch them on h
   fixed_rubric: yes            # yes | no | a file path (= on, use exactly that file)
   static_rubric: yes           # lines left out = yes; flags override for one run
   adaptive_rubric: yes
-source: ../../dataset/...     # SkillsBench wrapper ONLY; combining with instruction/
-                               # workspace/graders is an error
+source: ../../dataset/...     # SkillsBench wrapper ONLY: the dataset defines the task. The
+                               # wrapper may carry defaults, timeout, and the graders panel
+                               # (verifier + judges, switches only) — never instruction/workspace
 ```
 
 Two ways to say the same thing. Spell every scorer out in `graders:` when you want the config to
@@ -236,6 +240,9 @@ name its files ([`tasks/fix-logging`](tasks/fix-logging/adarubric.yaml) does), o
 script checks and let the `grading:` switches add the judges with the `rubrics/<task>/` files. Either
 way the same gates apply: a judge runs only if its switch is on, a judge key exists, and the run
 isn't the free oracle check — and `--llm-rubric no` and friends still win for one run.
+
+A judge's `rubric:` path that doesn't exist yet simply means "generate it there on the first
+run" — never an error, never the path judged as text.
 
 `TASK.md` + `grader.yaml` work as a simpler substitute (no workspace/defaults). The skill must
 live at the task root (whole folder = skill, only for one-skill-and-nothing-else) or under
@@ -305,12 +312,15 @@ environment fills in the rest.
 ACP flags (`--acp-cmd`, `--acp-skill-dir`, `--acp-env-key`, `--acp-install`, `--acp-name`):
 see [coding_agent_harness.md](coding_agent_harness.md).
 
-### `adarubric init <path>` — drafts the config
+### `adarubric init <path>` — sets up everything except your check
 
-Your skill folder or a SkillsBench task. Writes the yaml skeleton, generates the switched-on
-rubrics into `rubrics/<task>/`, references them by path. `--static-rubric no` /
-`--adaptive-rubric no` skip generation (no LLM spend); `--force` overwrites. SkillsBench gets a
-thin `tasks/<name>/` wrapper — the dataset is never touched.
+Your skill folder or a SkillsBench task. After init, **your one job is the deterministic
+grader's `run:`** — the skill is declared, instruction and workspace drafted (TODOs without a
+key), all four scorers listed with `include:` switches, and the rubric files generated into
+`rubrics/<task>/`. Run it on a **half-written** adarubric.yaml and it keeps everything you wrote,
+filling only the gaps (`--force` starts over). `--static-rubric no` / `--adaptive-rubric no`
+skip generation (no LLM spend). SkillsBench gets a thin `tasks/<name>/` wrapper — the dataset is
+never touched.
 
 ### `adarubric check <task>` — free health check
 

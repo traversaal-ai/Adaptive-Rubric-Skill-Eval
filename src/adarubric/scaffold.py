@@ -217,6 +217,158 @@ def render_template(task_name: str, instruction: str) -> str:
     return TEMPLATE.format(task_name=task_name, instruction=instruction)
 
 
+# --------------------------------------------------------------- the one-file task (new format)
+
+_TODO_RUN = 'echo \'{"score": 0.0, "details": "TODO: write your check - print {score: 0..1} JSON"}\''
+
+
+def _block(text: str, indent: str) -> str:
+    """Render ``text`` as a YAML block scalar under ``indent`` (instruction / run bodies)."""
+    lines = str(text).rstrip().splitlines() or [""]
+    return "|\n" + "\n".join(f"{indent}{ln}" if ln.strip() else "" for ln in lines)
+
+
+def _grader_lines(g: dict, comment: str = "") -> str:
+    """One graders: entry — type, include, weight, then run:/rubric: and any provider/model."""
+    tail = f"   # {comment}" if comment else ""
+    out = [f"  - type: {g['type']}{tail}",
+           f"    include: {'yes' if g.get('include', True) else 'no'}"]
+    if g.get("weight") is not None:
+        out.append(f"    weight: {g['weight']}")
+    for key in ("provider", "model"):
+        if g.get(key):
+            out.append(f"    {key}: {g[key]}")
+    if g.get("run"):
+        # Always a block scalar: shell commands are full of ': ', '{', '#' — every one of them
+        # breaks a plain YAML scalar. A block carries ANY text verbatim (plus a harmless \n).
+        out.append(f"    run: {_block(str(g['run']).rstrip(), '      ')}")
+    if g.get("rubric"):
+        rub = str(g["rubric"])
+        if len(rub.splitlines()) > 1:
+            out.append(f"    rubric: {_block(rub, '      ')}")
+        else:
+            out.append(f"    rubric: {rub}")
+    return "\n".join(out)
+
+
+def render_task_yaml(values: dict) -> str:
+    """The whole task in ONE visible file — what ``init`` writes (and what merge-fill re-renders).
+
+    ``values``: agent, trials, timeout, instruction, skills (list of rel paths), workspace (list
+    of "src:dest" strings), graders (list of dicts with type/include/weight/run/rubric/…),
+    inject_skills (bool | None). Every scorer appears with an explicit ``include:`` so the reader
+    sees what runs and what doesn't — nothing hidden behind a default.
+    """
+    skills = values.get("skills") or []
+    skills_lines = "\n".join(f"  - {s}" for s in skills) if skills else \
+        "  # - skills/<name>        # TODO: no SKILL.md found - create one and list it here"
+    workspace = values.get("workspace") or []
+    ws_lines = "\n".join(f"  - {w}" for w in workspace) if workspace else \
+        "  # - fixtures/data.csv:data.csv   # TODO: list every file the agent starts with"
+    graders = "\n\n".join(
+        _grader_lines(g, _GRADER_COMMENTS.get(str(g.get("type")), ""))
+        for g in values.get("graders") or [])
+    inject = values.get("inject_skills")
+    inject_line = ("inject_skills: no\n\n" if inject is False else "")
+    instr = values.get("instruction")
+    instr_section = (f"instruction: {_block(instr, '  ')}" if instr else
+                     "# WRITE THE TASK: what should the agent do? Name the exact output files.\n"
+                     "instruction: |\n")
+
+    return f"""# adarubric.yaml - the WHOLE task in one file: what the agent gets, and every scorer
+# that judges it. `include: no` switches a scorer off entirely; flags override for one run.
+
+defaults:
+  agent: {values.get('agent') or 'gemini-cli'}
+  trials: {values.get('trials') or 1}
+
+{instr_section}
+
+# The skill(s) under test - injected for the agent to discover (control files stripped).
+skills:
+{skills_lines}
+
+# Files copied into the workspace before the agent starts (left: relative to this file).
+workspace:
+{ws_lines}
+
+timeout: {values.get('timeout') or 300}
+
+{inject_line}# Every scorer, visible. weight = share of the reward (fixed/adaptive are always 0:
+# scored and shown, never blended). rubric paths live in rubrics/ - edit those files freely.
+graders:
+{graders}
+"""
+
+
+_GRADER_COMMENTS = {
+    "deterministic": "YOUR check - the one thing left to write",
+    "llm_rubric": "static judge: THIS task's rubric",
+    "fixed_rubric": "baseline judge: same rubric for every task",
+    "adaptive_rubric": "4 task-specific tests, judged blind",
+}
+
+
+def default_graders(rubrics_rel: str, slug: str, det_run: str | None = None,
+                    det_weight: float = 0.7, include_static: bool = True,
+                    include_adaptive: bool = True, include_fixed: bool = True) -> list[dict]:
+    """The four-scorer skeleton with real paths — deterministic first, judges after.
+
+    With no LLM key on the machine the judge entries are written ``include: no``: declared so
+    the user SEES them, deliberately off until a key exists (flip to yes, or re-run init).
+    An off entry is BARE — type + include only. No path hint for a rubric that was never made;
+    flipping it to yes later generates the file at the standard rubrics/ spot automatically."""
+    graders = [
+        {"type": "deterministic", "include": True, "weight": det_weight,
+         "run": det_run or _TODO_RUN},
+        {"type": "llm_rubric", "include": include_static, "weight": 0.3,
+         "rubric": f"{rubrics_rel}/{slug}/static.md"},
+        {"type": "fixed_rubric", "include": include_fixed, "weight": 0.0,
+         "rubric": f"{rubrics_rel}/fixed.md"},
+        {"type": "adaptive_rubric", "include": include_adaptive, "weight": 0.0,
+         "rubric": f"{rubrics_rel}/{slug}/adaptive.json"},
+    ]
+    for g in graders:
+        if not g["include"]:
+            g.pop("rubric", None)
+            g["weight"] = None  # rendered without a weight line — nothing to weigh
+    return graders
+
+
+def parse_llm_draft(text: str) -> dict:
+    """Pull instruction / workspace / deterministic check out of the LLM's draft yaml (the
+    skillgrade-shaped ``tasks:[...]`` document). Anything unreadable → just missing."""
+    import yaml as _yaml
+
+    out: dict = {}
+    try:
+        raw = _yaml.safe_load(strip_fences(text)) or {}
+    except _yaml.YAMLError:
+        return out
+    if not isinstance(raw, dict):
+        return out
+    task = (raw.get("tasks") or [{}])[0] if isinstance(raw.get("tasks"), list) else raw
+    if not isinstance(task, dict):
+        return out
+    if task.get("instruction"):
+        out["instruction"] = str(task["instruction"]).strip()
+    ws: list[str] = []
+    for entry in task.get("workspace") or []:
+        if isinstance(entry, dict) and entry.get("src"):
+            ws.append(f"{entry['src']}:{entry.get('dest') or Path(str(entry['src'])).name}")
+        elif entry:
+            ws.append(str(entry))
+    if ws:
+        out["workspace"] = ws
+    for g in task.get("graders") or []:
+        if isinstance(g, dict) and g.get("type", "deterministic") == "deterministic" and g.get("run"):
+            out["det_run"] = str(g["run"]).rstrip()
+            if g.get("weight") is not None:
+                out["det_weight"] = float(g["weight"])
+            break
+    return out
+
+
 def detect_skills_with_content(d: Path) -> list[tuple[str, str]]:
     """(name, SKILL.md text) for every skill the runner would find — same four locations."""
     from adarubric.loading import _detect_skills, _parse_skill_name

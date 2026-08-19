@@ -479,19 +479,26 @@ class EvalRunner:
         cost money and mean nothing). Whatever the task didn't declare is appended below, ordered
         fixed — static — adaptive so each judge sees every earlier verdict in the transcript.
         """
-        if spec.mode == "skillbench" and spec.verifier_path:
+        # `include:/enabled: no` on a declared grader means deliberately OFF — dropped from the
+        # run AND barred from the auto-append below. A scorer the task switched off must never
+        # sneak back in as "the default we add when it's missing".
+        declared_off = {g.type for g in spec.graders if not g.enabled}
+        run_llm = spec.run_llm_rubric and "llm_rubric" not in declared_off
+        run_fixed = spec.run_fixed_rubric and "fixed_rubric" not in declared_off
+        run_adaptive = spec.run_adaptive_rubric and "adaptive_rubric" not in declared_off
+        if spec.mode == "skillbench" and spec.verifier_path and "skillbench_verifier" not in declared_off:
             specs = [GraderSpec(type="skillbench_verifier", weight=1.0)]
         else:
-            specs = list(spec.graders)
+            specs = [g for g in spec.graders if g.enabled]
         # A judge is a judge however it got here. Whether the TASK listed it in `graders:` or we
         # append it below, the same three gates decide: its switch, a judge key existing at all,
         # and not being the free oracle health-check. Without this, `--llm-rubric no` silently kept
         # judging any task that declared its own judge, and a task declaring one on a machine with
         # no judge key failed the whole grading instead of skipping quietly.
         switched_off = {t for t, on in (
-            ("llm_rubric", spec.run_llm_rubric),
-            ("fixed_rubric", spec.run_fixed_rubric),
-            ("adaptive_rubric", spec.run_adaptive_rubric),
+            ("llm_rubric", run_llm),
+            ("fixed_rubric", run_fixed),
+            ("adaptive_rubric", run_adaptive),
         ) if not on}
         oracle_run = bool(getattr(harness, "runs_oracle", False))
 
@@ -512,7 +519,7 @@ class EvalRunner:
         # task. Nothing here to configure: agent on Together with a gemini judge just works.
         jp, jm = None, None
         if (
-            spec.run_fixed_rubric
+            run_fixed
             and not getattr(harness, "runs_oracle", False)
             and not any(g.type == "fixed_rubric" for g in specs)
             and pick_provider(jp, env) is not None
@@ -521,7 +528,7 @@ class EvalRunner:
                 type="fixed_rubric", rubric=spec.fixed_rubric_text or self._fixed_rubric_text(),
                 provider=jp, model=jm, weight=0.0, auto=True))
         if (
-            spec.run_llm_rubric
+            run_llm
             and not getattr(harness, "runs_oracle", False)
             and not any(g.type == "llm_rubric" for g in specs)
             and pick_provider(jp, env) is not None
@@ -551,7 +558,7 @@ class EvalRunner:
         ap = spec.adaptive_provider
         am = spec.adaptive_model
         if (
-            spec.run_adaptive_rubric
+            run_adaptive
             and self.grade
             and not getattr(harness, "runs_oracle", False)
             and not any(g.type == "adaptive_rubric" for g in specs)
@@ -658,6 +665,7 @@ class EvalRunner:
                   path: str | None = None, provider: str | None = None) -> dict:
             g = own.get(kind)
             if g is not None:                      # the task declared this judge itself
+                enabled = enabled and g.enabled    # its include: no wins over the global switch
                 weight = g.weight
                 path = g.rubric_path or ("inline in the task's yaml" if g.rubric else None)
                 provider = g.provider or provider
@@ -676,9 +684,9 @@ class EvalRunner:
             # in its own yaml. Either way they appear here, so `checks` + `judges` is always the
             # complete list of what scored the run.
             "checks": (
-                [{"type": "skillbench_verifier", "weight": 1.0}]
+                [{"type": "skillbench_verifier", "weight": 1.0, "enabled": True}]
                 if spec.mode == "skillbench" and spec.verifier_path
-                else [{"type": g.type, "weight": g.weight}
+                else [{"type": g.type, "weight": g.weight, "enabled": g.enabled}
                       for g in spec.graders if g.type not in self._JUDGE_TYPES]
             ),
             "judges": {

@@ -113,11 +113,12 @@ def _load_config(d: Path, cfg_path: Path, instruction: str | None, task: str | N
     # "SkillsBench results" would quietly stop being SkillsBench results.
     source = raw.get("source")
     if source:
-        for forbidden in ("instruction", "workspace", "tasks", "graders"):
+        for forbidden in ("instruction", "workspace", "tasks"):
             if raw.get(forbidden):
                 raise ValueError(
                     f"{cfg_path.name}: '{forbidden}:' is not allowed next to 'source:' — the "
-                    f"benchmark task defines that itself. Allowed: defaults, timeout, grading.")
+                    f"benchmark task defines that itself. Allowed: defaults, timeout, graders "
+                    f"(scorer switches), grading.")
         src = (d / str(source)).resolve()
         if not _is_skillsbench_task(src):
             raise ValueError(f"{cfg_path.name}: source does not point at a SkillsBench task: {src}")
@@ -129,6 +130,7 @@ def _load_config(d: Path, cfg_path: Path, instruction: str | None, task: str | N
             spec.timeout_sec = int(timeout)
         _apply_inject_skills(spec, raw, defaults)
         _apply_grading_switches(spec, raw, d)
+        _apply_wrapper_graders(spec, raw.get("graders") or [], d, cfg_path.name)
         return spec
 
     # defaults + tasks[] shape: pick the named task, else the first.
@@ -171,9 +173,19 @@ def _load_config(d: Path, cfg_path: Path, instruction: str | None, task: str | N
     docker = task_def.get("docker") or raw.get("docker") or defaults.get("docker") or {}
     timeout = task_def.get("timeout") or raw.get("timeout") or defaults.get("timeout")
 
-    # Skill: explicit `skill:` path, else auto-detect in the folder.
+    # Skills: an explicit `skills:` list (what `init` writes — every skill visible in the yaml),
+    # a single `skill:` path, else auto-detect in the folder.
+    skills_rel = raw.get("skills") or task_def.get("skills")
     skill_rel = raw.get("skill") or defaults.get("skill")
-    if skill_rel:
+    if isinstance(skills_rel, list) and skills_rel:
+        skill_paths = []
+        for rel in skills_rel:
+            sp = (d / str(rel)).resolve()
+            if not (sp / "SKILL.md").is_file() and not sp.is_file():
+                raise ValueError(f"{cfg_path.name}: skills entry has no SKILL.md: {sp}")
+            skill_paths.append(str(sp if sp.is_dir() else sp.parent))
+        name = task_def.get("name") or raw.get("name") or d.name
+    elif skill_rel:
         sp = (d / str(skill_rel)).resolve()
         skill_paths = [str(sp if sp.is_dir() else sp.parent)]
         name = task_def.get("name") or raw.get("name") or d.name
@@ -181,10 +193,11 @@ def _load_config(d: Path, cfg_path: Path, instruction: str | None, task: str | N
         skill_paths, folder_name = _detect_skills(d)
         name = task_def.get("name") or raw.get("name") or folder_name
     if not skill_paths:
-        raise ValueError(f"No skill found for {cfg_path} - add a `skill:` path or a SKILL.md.")
+        raise ValueError(f"No skill found for {cfg_path} - add a `skills:` list or a SKILL.md.")
 
     # Graders (compact all-in-one shape): tasks[].graders or top-level graders.
-    graders = _parse_graders(task_def.get("graders") or raw.get("graders") or [], base=d)
+    graders = _prune_missing_rubrics(
+        _parse_graders(task_def.get("graders") or raw.get("graders") or [], base=d))
 
     # defaults.grader_provider / defaults.grader_model fill in graders that didn't pick their own.
     for g in graders:
@@ -257,18 +270,85 @@ def _apply_grading_switches(spec: EvalSpec, raw: dict, base: Path) -> None:
     on, path = _switch(adaptive, base)
     spec.run_adaptive_rubric = on
     if path is not None:
-        from adarubric.grading.adaptive_rubric.generate import _valid
         if not path.is_file():
             raise ValueError(f"grading.adaptive_rubric points at a missing file: {path}")
-        parsed = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        criteria = parsed.get("criteria") if isinstance(parsed, dict) else parsed
-        if not _valid(criteria):
+        _set_adaptive_from_file(spec, path)
+
+
+def _set_adaptive_from_file(spec: EvalSpec, path: Path) -> None:
+    """Read + validate a 4-test criteria file and pin the spec's adaptive rubric to it."""
+    from adarubric.grading.adaptive_rubric.generate import _valid
+
+    parsed = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    criteria = parsed.get("criteria") if isinstance(parsed, dict) else parsed
+    if not _valid(criteria):
+        raise ValueError(
+            f"adaptive rubric file {path} is not a valid 4-test criteria JSON "
+            f"(ids must be completeness, fidelity_1, fidelity_2, process).")
+    import json as _json
+    spec.adaptive_criteria_json = _json.dumps({"criteria": criteria})
+    spec.adaptive_rubric_path = str(path)
+
+
+#: The only grader types a `source:` wrapper may list — switches over the benchmark's scorers.
+_WRAPPER_GRADER_TYPES = ("skillbench_verifier", "llm_rubric", "fixed_rubric", "adaptive_rubric")
+
+
+def _apply_wrapper_graders(spec: EvalSpec, items: object, base: Path, cfg_name: str) -> None:
+    """A ``graders:`` list in a SkillsBench wrapper — the visible on/off panel for the scorers.
+
+    Only switches and rubric paths belong here: the verifier's code and the task's own checks
+    live in the dataset and cannot be redefined. ``include: no`` on the verifier runs the task
+    without the benchmark's own scoring (judges only) — allowed, but it's your call.
+    """
+    graders = _parse_graders(items, base=base)
+    for g in graders:
+        if g.type not in _WRAPPER_GRADER_TYPES:
             raise ValueError(
-                f"grading.adaptive_rubric file {path} is not a valid 4-test criteria JSON "
-                f"(ids must be completeness, fidelity_1, fidelity_2, process).")
-        import json as _json
-        spec.adaptive_criteria_json = _json.dumps({"criteria": criteria})
-        spec.adaptive_rubric_path = str(path)
+                f"{cfg_name}: grader type '{g.type}' cannot be declared in a source: wrapper — "
+                f"the benchmark task defines its own checks. Allowed: "
+                f"{', '.join(_WRAPPER_GRADER_TYPES)}.")
+        if g.command:
+            raise ValueError(
+                f"{cfg_name}: '{g.type}' must not carry a run:/command: in a source: wrapper — "
+                f"the dataset's own scripts are the only checks that run.")
+        if g.type == "skillbench_verifier":
+            if not g.enabled:
+                spec.verifier_path = None  # deliberately unscored by the benchmark's checks
+        elif g.type == "llm_rubric":
+            spec.run_llm_rubric = g.enabled
+            if g.enabled and g.rubric_path:
+                spec.static_rubric_text = g.rubric
+                spec.static_rubric_path = g.rubric_path
+        elif g.type == "fixed_rubric":
+            spec.run_fixed_rubric = g.enabled
+            if g.enabled and g.rubric_path:
+                spec.fixed_rubric_text = g.rubric
+                spec.fixed_rubric_path = g.rubric_path
+        elif g.type == "adaptive_rubric":
+            spec.run_adaptive_rubric = g.enabled
+            if g.enabled and g.rubric_path:
+                _set_adaptive_from_file(spec, Path(g.rubric_path))
+
+
+def _looks_like_path(text: str) -> bool:
+    line = text.strip()
+    return (len(text.splitlines()) == 1
+            and (line.endswith((".md", ".json", ".txt")) or "/" in line or "\\" in line))
+
+
+def _prune_missing_rubrics(graders: list[GraderSpec]) -> list[GraderSpec]:
+    """A judge entry whose ``rubric:`` names a file that doesn't exist YET (fresh task, rubric
+    generation deferred to the first run): keep the judge ON, drop the entry — the runner
+    generates the file at that standard location and judges with it. Keeping the entry would
+    hand the judge the path STRING as if it were the rubric text."""
+    kept: list[GraderSpec] = []
+    for g in graders:
+        if (g.type in ("llm_rubric", "fixed_rubric", "adaptive_rubric") and g.enabled
+                and g.rubric and g.rubric_path is None and _looks_like_path(str(g.rubric))):
+            continue
+        kept.append(g)
+    return kept
 
 
 def _switch(value: object, base: Path) -> tuple[bool, Path | None]:
@@ -357,19 +437,49 @@ def _parse_graders(items: object, base: Path | None = None) -> list[GraderSpec]:
         if not isinstance(g, dict):
             continue
         command = g.get("run") or g.get("command")
+        gtype = str(g.get("type", "deterministic"))
+        # fixed/adaptive are research scorers: recorded and shown, NEVER blended into the reward.
+        # Forced to 0 here so a forgotten `weight:` line (dataclass default 1.0) can't quietly
+        # turn the baseline judge into 100% of the score.
+        weight = 0.0 if gtype in ("fixed_rubric", "adaptive_rubric") else float(g.get("weight", 1.0))
         graders.append(
             GraderSpec(
-                type=str(g.get("type", "deterministic")),
+                type=gtype,
                 command=command,
                 rubric=_resolve_rubric(g.get("rubric"), base),
                 rubric_path=_rubric_file(g.get("rubric"), base),
                 model=g.get("model"),
                 provider=g.get("provider"),
-                weight=float(g.get("weight", 1.0)),
+                weight=weight,
                 stage_paths=_command_file_refs(command, base),
+                enabled=_enabled(g),
             )
         )
     return graders
+
+
+#: Spellings accepted for a scorer's on/off line. `include` is taken too: a switch you can't find
+#: the word for is a switch that silently doesn't work.
+_ENABLED_KEYS = ("enabled", "include")
+_ENABLED_NO = {"no", "n", "false", "f", "0", "off", "skip", "none"}
+
+
+def _enabled(g: dict) -> bool:
+    """``enabled: no`` (or ``include: no``) on one grader — declared, deliberately not run.
+
+    Absent → True: a scorer written down with no switch is a scorer you want. Only an explicit no
+    turns one off, so a typo in the VALUE can't quietly disable a check you were counting on.
+    """
+    for key in _ENABLED_KEYS:
+        if key not in g:
+            continue
+        value = g[key]
+        if isinstance(value, bool):     # yaml reads bare yes/no/true/false as booleans
+            return value
+        if value is None:
+            return True
+        return str(value).strip().lower() not in _ENABLED_NO
+    return True
 
 
 def _rubric_file(rubric: object, base: Path | None) -> str | None:
