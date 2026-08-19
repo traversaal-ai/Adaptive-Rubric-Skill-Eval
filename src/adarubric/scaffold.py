@@ -219,7 +219,25 @@ def render_template(task_name: str, instruction: str) -> str:
 
 # --------------------------------------------------------------- the one-file task (new format)
 
-_TODO_RUN = 'echo \'{"score": 0.0, "details": "TODO: write your check - print {score: 0..1} JSON"}\''
+#: The commented hint written when the task has no check yet — a REAL run line is never faked.
+_RUN_HINT = ("# run: python graders/check.py   "
+             "# TODO: put your check script in graders/ and set this path")
+
+
+def graders_folder_run(d: Path) -> str | None:
+    """A run: command for the first check script found in the task's graders/ folder — the
+    designated place for checks. None when there's nothing there (the yaml then carries the
+    commented hint instead of a fake command)."""
+    gd = d / "graders"
+    if not gd.is_dir():
+        return None
+    runners = {".py": "python", ".js": "node", ".sh": "bash"}
+    for f in sorted(gd.iterdir()):
+        if f.is_file() and f.suffix in runners:
+            return f"{runners[f.suffix]} graders/{f.name}"
+    return None
+
+
 
 
 def _block(text: str, indent: str) -> str:
@@ -242,6 +260,9 @@ def _grader_lines(g: dict, comment: str = "") -> str:
         # Always a block scalar: shell commands are full of ': ', '{', '#' — every one of them
         # breaks a plain YAML scalar. A block carries ANY text verbatim (plus a harmless \n).
         out.append(f"    run: {_block(str(g['run']).rstrip(), '      ')}")
+    elif g["type"] == "deterministic":
+        # No check found anywhere — never fake one. The hint names the designated folder.
+        out.append(f"    {_RUN_HINT}")
     if g.get("rubric"):
         rub = str(g["rubric"])
         if len(rub.splitlines()) > 1:
@@ -264,7 +285,8 @@ def render_task_yaml(values: dict) -> str:
         "  # - skills/<name>        # TODO: no SKILL.md found - create one and list it here"
     workspace = values.get("workspace") or []
     ws_lines = "\n".join(f"  - {w}" for w in workspace) if workspace else \
-        "  # - fixtures/data.csv:data.csv   # TODO: list every file the agent starts with"
+        ("  # - fixtures/data.csv:data.csv   # TODO: add your files/folders yourself\n"
+         "  #   (left: path relative to this file; right: name inside the workspace)")
     graders = "\n\n".join(
         _grader_lines(g, _GRADER_COMMENTS.get(str(g.get("type")), ""))
         for g in values.get("graders") or [])
@@ -335,7 +357,7 @@ def default_graders(rubrics_rel: str, slug: str, det_run: str | None = None,
     flipping it to yes later generates the file at the standard rubrics/ spot automatically."""
     graders = [
         {"type": "deterministic", "include": True, "weight": det_weight,
-         "run": det_run or _TODO_RUN},
+         "run": det_run},  # None -> the renderer writes the commented path hint, never a fake
         {"type": "llm_rubric", "include": include_static, "weight": 0.3,
          "rubric": f"{rubrics_rel}/{slug}/static.md"},
         {"type": "fixed_rubric", "include": include_fixed, "weight": 0.0,

@@ -186,7 +186,31 @@ def run(
     if local:  # --local is just the short spelling; everything downstream reads `sandbox`
         sandbox = "local"
 
-    spec = load_spec(path, instruction, task=task)
+    # A yaml problem is a message, never a traceback — the loader's errors already say exactly
+    # what's wrong ("No instruction found...", "skills entry has no SKILL.md...").
+    try:
+        spec = load_spec(path, instruction, task=task)
+    except (ValueError, FileNotFoundError) as exc:
+        typer.secho(f"Cannot run this task: {exc}", fg="red")
+        typer.echo("Fix the adarubric.yaml (or the folder), then re-run. Nothing was started.")
+        raise typer.Exit(code=1) from None
+
+    # Refuse EARLY when the run's must-haves are missing — a plain list now beats a cryptic
+    # failure after the image is built and API money is spent.
+    problems: list[str] = []
+    for g in spec.graders:
+        if g.type == "deterministic" and g.enabled and not (g.command or "").strip():
+            problems.append("graders: the deterministic entry has no run: line - put your check "
+                            "in graders/ and set e.g.  run: python graders/check.py")
+    for src in (*spec.workspace_map, *spec.workspace_files):
+        if not os.path.exists(src):
+            problems.append(f"workspace: file not found on disk - {src}")
+    if problems:
+        typer.secho("This task isn't ready to run - missing from its yaml/folder:", fg="red")
+        for p in problems:
+            typer.secho(f"  - {p}", fg="red")
+        typer.echo("Fix adarubric.yaml, then re-run. Nothing was started.")
+        raise typer.Exit(code=1)
 
     # Precedence, everywhere: command line > the task's defaults > built-in defaults.
     harness = harness or spec.default_harness
@@ -544,6 +568,7 @@ def init(
         default_graders,
         detect_skills_with_content,
         generate_with_llm,
+        graders_folder_run,
         parse_llm_draft,
         pick_init_llm,
         render_task_yaml,
@@ -637,10 +662,10 @@ def init(
                   "openai": "OPENAI_API_KEY", "together": "TOGETHER_API_KEY"}.get(_jp)
     if _jkey_name and env.get("JUDGE_API_KEY"):
         env.setdefault(_jkey_name, env["JUDGE_API_KEY"])
-    has_det = any(g["type"] == "deterministic" for g in user_graders)
     has_llm = pick_init_llm(env) is not None
-    needs_draft = values["skills"] and (
-        not values["instruction"] or not values["workspace"] or not has_det)
+    # The LLM drafts ONE thing: the instruction. The check comes only from graders/, the
+    # workspace only from fixtures/ — no folder means a commented hint, never an invented value.
+    needs_draft = bool(values["skills"]) and not values["instruction"]
     draft: dict = {}
     if needs_draft and has_llm:
         provider = pick_init_llm(env)
@@ -659,15 +684,18 @@ def init(
         typer.echo("    - add GEMINI_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY /")
         typer.echo("      TOGETHER_API_KEY to .env and re-run init to draft the rest for you")
     values["instruction"] = values["instruction"] or draft.get("instruction")
-    values["workspace"] = values["workspace"] or draft.get("workspace")
+    # Workspace: ONLY what the user wrote. No auto-detection - an empty section with a comment
+    # asks them to list their files themselves (only listed files ever reach the agent).
 
     # ---- the four scorers: the user's entries verbatim, missing ones appended -------------
+    # The check: only a script found in the designated graders/ folder, else NOTHING but a
+    # commented path hint - a value nobody wrote must never grade a run.
     # Without an LLM key the judges can't run anyway — write them include: no (declared,
     # deliberately off) instead of pretending they'll score the next run.
     slug = _slug(d.name)
     rubrics_rel = os.path.relpath(Path("rubrics").resolve(), d).replace("\\", "/")
-    skeleton = default_graders(rubrics_rel, slug, det_run=draft.get("det_run"),
-                               det_weight=draft.get("det_weight", 0.7),
+    skeleton = default_graders(rubrics_rel, slug,
+                               det_run=graders_folder_run(d),
                                include_static=want_static and has_llm,
                                include_adaptive=want_adaptive and has_llm,
                                include_fixed=has_llm)
@@ -694,8 +722,11 @@ def init(
         except Exception as exc:  # noqa: BLE001
             typer.secho(f"  warning: the file doesn't load cleanly ({exc}). "
                         "Fix it by hand before running.", fg="yellow")
-    typer.echo(f"\n  Your one job: the deterministic grader's run: (and any empty/TODO lines)."
-               f"\n  Then:  uv run adarubric eval {path}\n")
+    typer.secho(f"\n  NOW OPEN {out_path.name} AND CHECK IT before running:", fg="yellow")
+    typer.echo("    - instruction: written? workspace: lists your files? graders run: set?")
+    typer.echo("    - conventions: checks in graders/, starting files in fixtures/, "
+               "skills in skills/<name>/")
+    typer.echo(f"  Then:  uv run adarubric eval {path}\n")
 
 
 def _generate_rubrics(spec, env: dict, ref_dir, want_static: bool, want_adaptive: bool):
