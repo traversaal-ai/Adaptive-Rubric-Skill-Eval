@@ -44,6 +44,7 @@ graders:
   # Runs after the agent is gone, in the finished workspace. Written as a python one-liner so it
   # behaves the same under bash and Windows cmd.
   - type: deterministic
+    include: yes
     weight: 0.7
     run: >-
       python -c "import json,os,re,subprocess,sys;
@@ -62,13 +63,16 @@ graders:
       print(json.dumps({'score':round(n/len(c),2),'details':'; '.join(('ok ' if v else 'MISS ')+k for k,v in c)}))"
 
   - type: llm_rubric
+    include: yes
     weight: 0.3
     rubric: ../../rubrics/fix-logging/static.md
 
   - type: fixed_rubric
+    include: yes
     weight: 0.0
     rubric: ../../rubrics/fixed.md
 
   - type: adaptive_rubric
+    include: yes
     weight: 0.0
     rubric: ../../rubrics/fix-logging/adaptive.json

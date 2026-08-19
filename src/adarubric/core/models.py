@@ -397,6 +397,14 @@ class EvalSpec:
     # Defaults a config file may carry (CLI flags override these; built-ins fill what's left).
     default_harness: str | None = None  # defaults.agent / defaults.harness in the yaml
     default_trials: int | None = None  # defaults.trials
+    #: The adarubric.yaml this spec came from (None for convention folders / raw dataset paths).
+    #: Lets the runner write a generated rubric's path back into a bare `include: yes` entry,
+    #: so the config always shows which file judges the task.
+    config_path: str | None = None
+    #: The SkillsBench verifier's reward share. 0.7 so verifier+judge normalize to the SAME
+    #: 70/30 split personal tasks use (deterministic 0.7 / static 0.3) — one split everywhere.
+    #: A wrapper's own `weight:` on its verifier entry overrides it.
+    verifier_weight: float = 0.7
 
     # Run settings
     attempts: int = 1

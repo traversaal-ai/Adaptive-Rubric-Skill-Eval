@@ -487,7 +487,7 @@ class EvalRunner:
         run_fixed = spec.run_fixed_rubric and "fixed_rubric" not in declared_off
         run_adaptive = spec.run_adaptive_rubric and "adaptive_rubric" not in declared_off
         if spec.mode == "skillbench" and spec.verifier_path and "skillbench_verifier" not in declared_off:
-            specs = [GraderSpec(type="skillbench_verifier", weight=1.0)]
+            specs = [GraderSpec(type="skillbench_verifier", weight=spec.verifier_weight)]
         else:
             specs = [g for g in spec.graders if g.enabled]
         # A judge is a judge however it got here. Whether the TASK listed it in `graders:` or we
@@ -511,6 +511,13 @@ class EvalRunner:
             return pick_provider(own_provider, env) is not None
 
         specs = [g for g in specs if g.type not in self._JUDGE_TYPES or judge_runs(g)]
+        # SAY it when judges are wanted but can't run — a silent skip reads as "the judge scored
+        # nothing for no reason" on the dashboard.
+        if (not oracle_run and (run_llm or run_fixed or run_adaptive)
+                and pick_provider(None, env) is None):
+            self._say("judges SKIPPED: no LLM key / judge not set - put GEMINI_API_KEY / "
+                      "ANTHROPIC_API_KEY / OPENAI_API_KEY / TOGETHER_API_KEY in .env, or set "
+                      "JUDGE_LLM_PROVIDER + JUDGE_API_KEY. Script checks still run.")
         # The FIXED-rubric judge — the baseline rung: SAME rubric text for every task, same
         # protocol as the static judge, weight 0. Ordered before static so the ladder reads
         # fixed -> generated static -> adaptive on every run.
@@ -546,6 +553,12 @@ class EvalRunner:
             rubric = spec.static_rubric_text or generated_task_rubric(
                 spec, env, self.rubrics_root, provider=jp, model=jm,
                 legacy_root=str(Path(self.output_root) / "rubrics"))
+            if rubric and not spec.static_rubric_text:
+                # Generated (or served from the cache): if the yaml switched this judge on
+                # without naming a file, write the file's path in so the config shows it.
+                _record_generated_rubric(
+                    spec, "llm_rubric",
+                    Path(self.rubrics_root) / _rubric_slug(spec.name) / "static.md", self._say)
             specs.append(GraderSpec(
                 type="llm_rubric", rubric=rubric, provider=jp, model=jm,
                 weight=self._DEFAULT_LLM_WEIGHT, auto=True))
@@ -574,6 +587,11 @@ class EvalRunner:
                     provider=ap, model=am,
                     legacy_root=str(Path(self.output_root) / "rubrics"))
                 criteria_json = json.dumps({"criteria": criteria}) if criteria is not None else None
+                if criteria_json is not None:
+                    _record_generated_rubric(
+                        spec, "adaptive_rubric",
+                        Path(self.rubrics_root) / _rubric_slug(spec.name) / "adaptive.json",
+                        self._say)
             if criteria_json is not None:
                 specs.append(GraderSpec(
                     type="adaptive_rubric", rubric=criteria_json,
@@ -684,7 +702,7 @@ class EvalRunner:
             # in its own yaml. Either way they appear here, so `checks` + `judges` is always the
             # complete list of what scored the run.
             "checks": (
-                [{"type": "skillbench_verifier", "weight": 1.0, "enabled": True}]
+                [{"type": "skillbench_verifier", "weight": spec.verifier_weight, "enabled": True}]
                 if spec.mode == "skillbench" and spec.verifier_path
                 else [{"type": g.type, "weight": g.weight, "enabled": g.enabled}
                       for g in spec.graders if g.type not in self._JUDGE_TYPES]
@@ -812,6 +830,36 @@ class _WorkspaceWatcher:
                 extra = f" … and {len(named) - 10} more" if len(named) > 10 else ""
                 self._say("working: " + ", ".join(named[:10]) + extra)
             self._prev = now
+
+
+def _record_generated_rubric(spec: EvalSpec, gtype: str, rubric_file: Path,
+                             say: Callable[[str], None]) -> None:
+    """Write a generated rubric's path back into the task yaml's bare ``include: yes`` entry.
+
+    The user switched a judge on without naming a file; the file now exists — the config should
+    say so, or "what judged my run?" needs code-reading to answer. Best-effort TEXT surgery:
+    fires only when the entry exists and has no ``rubric:`` line; any other shape (custom
+    indentation, path already present, no such entry) leaves the file untouched.
+    """
+    if not spec.config_path:
+        return
+    cfg = Path(spec.config_path)
+    try:
+        text = cfg.read_text(encoding="utf-8")
+    except OSError:
+        return
+    m = re.search(rf"(?m)^(\s*)- type: {gtype}[^\n]*((?:\n\1  [^\n]+)*)", text)
+    if not m or "rubric:" in m.group(0):
+        return
+    rel = os.path.relpath(rubric_file.resolve(), cfg.parent).replace("\\", "/")
+    indent = m.group(1) + "  "
+    updated = (text[:m.end()] + f"\n{indent}rubric: {rel}   # generated on first run"
+               + text[m.end():])
+    try:
+        cfg.write_text(updated, encoding="utf-8")
+    except OSError:
+        return
+    say(f"{_grader_label(gtype)}: rubric generated - path written into {cfg.name}")
 
 
 def _grader_label(gtype: str) -> str:

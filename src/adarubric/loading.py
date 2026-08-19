@@ -131,6 +131,7 @@ def _load_config(d: Path, cfg_path: Path, instruction: str | None, task: str | N
         _apply_inject_skills(spec, raw, defaults)
         _apply_grading_switches(spec, raw, d)
         _apply_wrapper_graders(spec, raw.get("graders") or [], d, cfg_path.name)
+        spec.config_path = str(cfg_path)
         return spec
 
     # defaults + tasks[] shape: pick the named task, else the first.
@@ -222,6 +223,7 @@ def _load_config(d: Path, cfg_path: Path, instruction: str | None, task: str | N
         spec.timeout_sec = int(timeout)
     _apply_inject_skills(spec, raw, defaults, task_def)
     _apply_grading_switches(spec, raw, d)
+    spec.config_path = str(cfg_path)
     return spec
 
 
@@ -315,6 +317,7 @@ def _apply_wrapper_graders(spec: EvalSpec, items: object, base: Path, cfg_name: 
         if g.type == "skillbench_verifier":
             if not g.enabled:
                 spec.verifier_path = None  # deliberately unscored by the benchmark's checks
+            spec.verifier_weight = g.weight  # the wrapper's declared share (default 0.7)
         elif g.type == "llm_rubric":
             spec.run_llm_rubric = g.enabled
             if g.enabled and g.rubric_path:
@@ -338,15 +341,22 @@ def _looks_like_path(text: str) -> bool:
 
 
 def _prune_missing_rubrics(graders: list[GraderSpec]) -> list[GraderSpec]:
-    """A judge entry whose ``rubric:`` names a file that doesn't exist YET (fresh task, rubric
-    generation deferred to the first run): keep the judge ON, drop the entry — the runner
-    generates the file at that standard location and judges with it. Keeping the entry would
-    hand the judge the path STRING as if it were the rubric text."""
+    """A judge entry with no usable rubric text yet gets the STANDARD treatment, not a broken run.
+
+    Two shapes mean "switch it on, let the runner supply the rubric": a ``rubric:`` path naming a
+    file that doesn't exist YET (generation deferred to the first run), and no ``rubric:`` line at
+    all (a bare ``include: yes``). Either way the entry is dropped and the judge is auto-added by
+    the runner — generating/caching into rubrics/<task>/ (static, adaptive) or reading
+    rubrics/fixed.md (fixed), at the standard weights. Keeping the entry would hand the judge a
+    path string — or nothing — as if it were the rubric."""
     kept: list[GraderSpec] = []
     for g in graders:
-        if (g.type in ("llm_rubric", "fixed_rubric", "adaptive_rubric") and g.enabled
-                and g.rubric and g.rubric_path is None and _looks_like_path(str(g.rubric))):
-            continue
+        if g.type in ("llm_rubric", "fixed_rubric", "adaptive_rubric") and g.enabled:
+            no_rubric = not g.rubric
+            path_not_yet = (g.rubric and g.rubric_path is None
+                            and _looks_like_path(str(g.rubric)))
+            if no_rubric or path_not_yet:
+                continue
         kept.append(g)
     return kept
 
@@ -440,8 +450,12 @@ def _parse_graders(items: object, base: Path | None = None) -> list[GraderSpec]:
         gtype = str(g.get("type", "deterministic"))
         # fixed/adaptive are research scorers: recorded and shown, NEVER blended into the reward.
         # Forced to 0 here so a forgotten `weight:` line (dataclass default 1.0) can't quietly
-        # turn the baseline judge into 100% of the score.
-        weight = 0.0 if gtype in ("fixed_rubric", "adaptive_rubric") else float(g.get("weight", 1.0))
+        # turn the baseline judge into 100% of the score. The verifier defaults to 0.7 so the
+        # SkillsBench split matches personal tasks (70% checks / 30% judge) out of the box.
+        if gtype in ("fixed_rubric", "adaptive_rubric"):
+            weight = 0.0
+        else:
+            weight = float(g.get("weight", 0.7 if gtype == "skillbench_verifier" else 1.0))
         graders.append(
             GraderSpec(
                 type=gtype,

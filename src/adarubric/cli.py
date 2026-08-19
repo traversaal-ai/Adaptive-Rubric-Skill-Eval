@@ -619,11 +619,21 @@ def init(
             })
 
     # ---- LLM drafts ONLY the missing pieces (nothing to draft = nothing spent) ------------
+    # Keys come from the SAME places every other command reads: the shell, ./.env in the folder
+    # you run from (the repo root rule), and — for compatibility — a .env in the task folder.
+    # Reading only the task folder's .env is the bug that made init write include: no for a
+    # user whose key sat in the repo root .env the whole time.
     env = dict(os.environ)
-    env_file = d / ".env"
-    if env_file.is_file():
-        for k, v in _load_env_file(str(env_file)).items():
-            env.setdefault(k, v)
+    for source in (Path(".env"), d / ".env"):
+        if source.is_file():
+            for k, v in _load_env_file(str(source)).items():
+                env.setdefault(k, v)
+    # A judge-only setup (JUDGE_LLM_PROVIDER + JUDGE_API_KEY, no provider key) counts too.
+    _jp = (env.get("JUDGE_LLM_PROVIDER") or "").strip().lower()
+    _jkey_name = {"gemini": "GEMINI_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
+                  "openai": "OPENAI_API_KEY", "together": "TOGETHER_API_KEY"}.get(_jp)
+    if _jkey_name and env.get("JUDGE_API_KEY"):
+        env.setdefault(_jkey_name, env["JUDGE_API_KEY"])
     has_det = any(g["type"] == "deterministic" for g in user_graders)
     has_llm = pick_init_llm(env) is not None
     needs_draft = values["skills"] and (
@@ -779,7 +789,7 @@ def _init_skillbench(task_dir, force: bool, want_static: bool, want_adaptive: bo
         f"graders:\n"
         f"  - type: skillbench_verifier   # the benchmark's own checks (staged AFTER the run)\n"
         f"    include: yes\n"
-        f"    weight: 1.0\n"
+        f"    weight: 0.7\n"
         f"\n"
         f"  - type: llm_rubric            # static judge: this task's generated rubric\n"
         f"    include: {onoff(want_static)}\n"
