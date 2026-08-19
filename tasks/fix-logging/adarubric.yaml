@@ -23,6 +23,10 @@ workspace:
 
 timeout: 300
 
+# docker:                        # the container this task runs in - uncomment to
+#   base: python:3.12-slim       # change the image (this is the default) or to
+#   setup: pip install pandas    # install what your task needs
+
 # Every scorer that runs, in ONE list: what it is, how much of the reward it carries, and the
 # exact file it judges from. Nothing is left to a default you would have to know about.
 #

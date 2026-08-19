@@ -270,6 +270,19 @@ def render_task_yaml(values: dict) -> str:
         for g in values.get("graders") or [])
     inject = values.get("inject_skills")
     inject_line = ("inject_skills: no\n\n" if inject is False else "")
+    docker = values.get("docker") or {}
+    if isinstance(docker, dict) and (docker.get("base") or docker.get("setup")):
+        docker_lines = ["docker:"]
+        if docker.get("base"):
+            docker_lines.append(f"  base: {docker['base']}")
+        if docker.get("setup"):
+            docker_lines.append(f"  setup: {_block(docker['setup'], '    ')}")
+        docker_section = "\n".join(docker_lines)
+    else:
+        docker_section = (
+            "# docker:                        # the container this task runs in - uncomment to\n"
+            "#   base: python:3.12-slim       # change the image (this is the default) or to\n"
+            "#   setup: pip install pandas    # install what your task needs")
     instr = values.get("instruction")
     instr_section = (f"instruction: {_block(instr, '  ')}" if instr else
                      "# WRITE THE TASK: what should the agent do? Name the exact output files.\n"
@@ -293,6 +306,8 @@ workspace:
 {ws_lines}
 
 timeout: {values.get('timeout') or 300}
+
+{docker_section}
 
 {inject_line}# Every scorer, visible. weight = share of the reward (fixed/adaptive are always 0:
 # scored and shown, never blended). rubric paths live in rubrics/ - edit those files freely.

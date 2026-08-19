@@ -589,6 +589,9 @@ def init(
                     or defaults_blk.get("timeout") or 300),
         "instruction": str(existing.get("instruction") or task_def.get("instruction") or "").strip() or None,
         "inject_skills": existing.get("inject_skills"),
+        # A docker recipe the user already wrote must survive a fill re-run verbatim.
+        "docker": (existing.get("docker") or task_def.get("docker")
+                   or defaults_blk.get("docker")),
     }
     ws: list[str] = []
     for entry in (existing.get("workspace") or task_def.get("workspace") or []):
