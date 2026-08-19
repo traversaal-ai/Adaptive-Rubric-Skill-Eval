@@ -237,6 +237,18 @@ class DockerSandbox(Sandbox):
             src = Path(src_s)
             if not src.exists():
                 continue
+            if src.is_dir():
+                # Directories: copy the CONTENTS into dest (the `src/.` idiom, same as stage()).
+                # This makes `- folder` land as folder/… and `- folder:.` spill the contents to
+                # the workspace root — byte-identical to the local sandbox. A bare `docker cp
+                # <dir>` instead renames-or-nests depending on whether dest already exists,
+                # which made `folder:.` pass locally and silently break under docker.
+                clean = dest_rel.strip("/")
+                dest = workdir if clean in (".", "") else f"{workdir}/{clean}"
+                _docker("exec", cid, "sh", "-c", f"mkdir -p '{dest}'")
+                self._note(f"copy → {dest}/ (contents of {src.name}/)")
+                _docker("cp", f"{src}/.", f"{cid}:{dest}")
+                continue
             dest = f"{workdir}/{dest_rel}".replace("//", "/")
             parent = dest.rsplit("/", 1)[0]
             _docker("exec", cid, "sh", "-c", f"mkdir -p '{parent}'")

@@ -323,7 +323,11 @@ defaults:
 skills:
 {skills_lines}
 
-# Files copied into the workspace before the agent starts (left: relative to this file).
+# Files copied into the workspace before the agent starts (paths relative to this file).
+# Three forms, all one line each:
+#   - file_to_fix                # whole folder arrives AS a folder -> agent sees file_to_fix/...
+#   - file_to_fix:.              # folder CONTENTS spill to the root -> agent sees CHANGELOG.md
+#   - file_to_fix/CHANGELOG.md   # a single file at the root
 workspace:
 {ws_lines}
 

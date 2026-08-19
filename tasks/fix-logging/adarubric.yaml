@@ -15,8 +15,12 @@ instruction: |
 
   Keep the program working: `python orders.py` must still run without errors.
 
-# Files copied into the workspace before the agent starts. Left side is relative to this file,
-# right side is where it lands in the workspace.
+# Files copied into the workspace before the agent starts (paths relative to this file).
+# Three forms, all one line each:
+#   - some_folder                # whole folder arrives AS a folder -> agent sees some_folder/...
+#   - some_folder:.              # folder CONTENTS spill to the root
+#   - some_folder/file.py        # a single file at the root
+#   - src.py:dest.py             # src:dest renames / re-paths a single file (used below)
 workspace:
   - fixtures/orders.py:orders.py
   - fixtures/applog.py:applog.py

@@ -204,9 +204,11 @@ instruction: |                 # required (or TASK.md, or --instruction)
   ...
 skills:                        # the skill(s) under test, declared visibly
   - skills/my-skill            #   (omit to auto-detect in the usual folders)
-workspace:                     # files copied to the agent
-  - file.txt                   #   lands at top, same name
-  - src/a.csv:data/a.csv       #   src:dest keeps/changes the path
+workspace:                     # files copied to the agent — one line per entry, four forms:
+  - file.txt                   #   a file, lands at top with the same name
+  - src/a.csv:data/a.csv       #   src:dest renames / re-paths a file
+  - my_folder                  #   whole folder arrives AS a folder (agent sees my_folder/…)
+  - my_folder:.                #   folder CONTENTS spill to the workspace root
 timeout: 300
 docker:                        # your own task's container recipe (ignored with --local)
   base: python:3.12-slim
