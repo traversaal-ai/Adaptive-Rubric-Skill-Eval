@@ -23,9 +23,26 @@ workspace:
 
 timeout: 300
 
-# Runs after the agent is gone, in the finished workspace. Prints {"score": 0..1}.
-# Written as a python one-liner so it behaves the same under bash and Windows cmd.
+# Every scorer that runs, in ONE list: what it is, how much of the reward it carries, and the
+# exact file it judges from. Nothing is left to a default you would have to know about.
+#
+#   deterministic     the script check below (weight 0.7). Runs in the finished workspace and
+#                     prints {"score": 0..1}.
+#   llm_rubric        the STATIC judge: THIS task's rubric (weight 0.3). Together with the check
+#                     above, that is the whole reward.
+#   fixed_rubric      the BASELINE: one rubric, the same words for every task in the repo. Ours by
+#                     default — open it, edit it, it's yours.
+#   adaptive_rubric   4 task-specific tests, judged blind, each pass having to quote its evidence.
+#
+# Rubrics live under rubrics/<task>/ — every task's, never in the task folder — so a `rubric:`
+# path here points back out at them. The file must exist; a missing one is a load error, not a
+# silent fallback. Weight 0 = scored and shown on the dashboard, never blended into the reward.
+#
+# --llm-rubric no / --fixed-rubric no / --adaptive-rubric no still switch any of these off for one
+# run, and a task that declares no judges at all gets them from a `grading:` block instead.
 graders:
+  # Runs after the agent is gone, in the finished workspace. Written as a python one-liner so it
+  # behaves the same under bash and Windows cmd.
   - type: deterministic
     weight: 0.7
     run: >-
@@ -44,18 +61,14 @@ graders:
       n=sum(1 for _,v in c if v);
       print(json.dumps({'score':round(n/len(c),2),'details':'; '.join(('ok ' if v else 'MISS ')+k for k,v in c)}))"
 
-  # An LLM judge reads the whole session (instruction, commands, output, the script check's result)
-  # and scores it against the rubric file below. Runs by default; turn off with --llm-rubric no.
   - type: llm_rubric
-    rubric: prompts/quality.md
     weight: 0.3
+    rubric: ../../rubrics/fix-logging/static.md
 
-# Which LLM judges run (yes | no | a file path). The static judge already uses this task's own
-# rubric (prompts/quality.md, above). Two more judges score every run at weight 0, for comparison:
-#   fixed_rubric    — the BASELINE: one rubric, same words for every task in the repo. That file
-#                     is rubrics/fixed.md (ours by default — open it, edit it, it's yours).
-#   adaptive_rubric — 4 task-specific tests, generated on first run into
-#                     rubrics/fix-logging/adaptive.json, judged blind with quoted evidence.
-grading:
-  fixed_rubric: ../../rubrics/fixed.md
-  adaptive_rubric: yes
+  - type: fixed_rubric
+    weight: 0.0
+    rubric: ../../rubrics/fixed.md
+
+  - type: adaptive_rubric
+    weight: 0.0
+    rubric: ../../rubrics/fix-logging/adaptive.json

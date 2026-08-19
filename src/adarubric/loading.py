@@ -242,6 +242,7 @@ def _apply_grading_switches(spec: EvalSpec, raw: dict, base: Path) -> None:
         if not path.is_file():
             raise ValueError(f"grading.fixed_rubric points at a missing file: {path}")
         spec.fixed_rubric_text = path.read_text(encoding="utf-8")
+        spec.fixed_rubric_path = str(path)
 
     static = grading.get("static_rubric")
     on, path = _switch(static, base)
@@ -250,6 +251,7 @@ def _apply_grading_switches(spec: EvalSpec, raw: dict, base: Path) -> None:
         if not path.is_file():
             raise ValueError(f"grading.static_rubric points at a missing file: {path}")
         spec.static_rubric_text = path.read_text(encoding="utf-8")
+        spec.static_rubric_path = str(path)
 
     adaptive = grading.get("adaptive_rubric")
     on, path = _switch(adaptive, base)
@@ -266,6 +268,7 @@ def _apply_grading_switches(spec: EvalSpec, raw: dict, base: Path) -> None:
                 f"(ids must be completeness, fidelity_1, fidelity_2, process).")
         import json as _json
         spec.adaptive_criteria_json = _json.dumps({"criteria": criteria})
+        spec.adaptive_rubric_path = str(path)
 
 
 def _switch(value: object, base: Path) -> tuple[bool, Path | None]:
@@ -359,6 +362,7 @@ def _parse_graders(items: object, base: Path | None = None) -> list[GraderSpec]:
                 type=str(g.get("type", "deterministic")),
                 command=command,
                 rubric=_resolve_rubric(g.get("rubric"), base),
+                rubric_path=_rubric_file(g.get("rubric"), base),
                 model=g.get("model"),
                 provider=g.get("provider"),
                 weight=float(g.get("weight", 1.0)),
@@ -366,6 +370,22 @@ def _parse_graders(items: object, base: Path | None = None) -> list[GraderSpec]:
             )
         )
     return graders
+
+
+def _rubric_file(rubric: object, base: Path | None) -> str | None:
+    """The file a `rubric:` value points at, or None when the rubric is inline text.
+
+    Same resolution as :func:`_resolve_rubric`, kept separate so the spec can carry the text AND
+    where it came from: a receipt that shows only text can't tell you which file to go edit.
+    """
+    if not rubric:
+        return None
+    text = str(rubric)
+    if base is not None and len(text.splitlines()) == 1:
+        candidate = (base / text.strip()).resolve()
+        if candidate.is_file():
+            return str(candidate)
+    return None
 
 
 def _resolve_rubric(rubric: object, base: Path | None) -> str | None:

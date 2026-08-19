@@ -64,7 +64,11 @@ from adarubric.core.skill_depth import classify as classify_skill_depth
 from adarubric.grading import create_grader
 from adarubric.grading.adaptive_rubric import generated_adaptive_rubric
 from adarubric.grading.static_rubric import DEFAULT_RUBRIC, pick_provider
-from adarubric.grading.static_rubric.generate import ensure_fixed_rubric, generated_task_rubric
+from adarubric.grading.static_rubric.generate import (
+    _slug as _rubric_slug,
+    ensure_fixed_rubric,
+    generated_task_rubric,
+)
 from adarubric.harnesses.oracle import ORACLE_DIR
 
 
@@ -74,6 +78,21 @@ def _now() -> str:
 
 def _safe(name: str) -> str:
     return re.sub(r"[^\w.-]+", "-", name).strip("-") or "task"
+
+
+def _rel(path: str | None) -> str | None:
+    """A path as the user would type it: relative to where they ran from, forward slashes.
+
+    Absolute host paths in a receipt are noise (and leak the home directory); a path under the
+    working directory is shown relative, anything outside it stays absolute so it stays findable.
+    """
+    if not path:
+        return path
+    try:
+        rel = os.path.relpath(path, os.getcwd())
+    except ValueError:      # different drive on Windows - no relative form exists
+        return path.replace("\\", "/")
+    return path.replace("\\", "/") if rel.startswith("..") else rel.replace("\\", "/")
 
 
 def _write_json(path: Path, obj: object) -> None:
@@ -169,8 +188,9 @@ class EvalRunner:
         # one attempt share a rubric, so the first that resolved it speaks for all of them.
         judged = next((r for r in results if r.rubric_used), None)
         if judged is not None:
-            manifest["grading"]["llm_rubric"]["source"] = judged.rubric_source
-            manifest["grading"]["llm_rubric"]["rubric"] = judged.rubric_used
+            used = manifest["grading"]["judges"]["llm_rubric"]
+            used["source"] = judged.rubric_source
+            used["rubric_text"] = judged.rubric_used
         if observed or judged is not None:
             eval_yaml.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
 
@@ -452,15 +472,38 @@ class EvalRunner:
         """The graders to apply: the SkillsBench verifier (skillbench) or the config's graders —
         plus, by default, the LLM judge with the built-in static rubric.
 
-        The judge is added when: it's enabled (``--llm-rubric no`` turns it off), the task didn't
-        define its own llm_rubric, a judge API key is actually available, and this isn't the free
-        oracle health-check (judging a scripted solution would cost money and mean nothing). The
-        auto-added judge is ordered LAST so it sees every other verdict in the transcript.
+        A task may declare all four scorers itself — one ``graders:`` list of type + weight +
+        rubric path — or declare none and let the ``grading:`` switches drive it. Both forms end up
+        here and obey the same gates: a judge runs only if its switch is on, a judge API key is
+        available, and this isn't the free oracle health-check (judging a scripted solution would
+        cost money and mean nothing). Whatever the task didn't declare is appended below, ordered
+        fixed — static — adaptive so each judge sees every earlier verdict in the transcript.
         """
         if spec.mode == "skillbench" and spec.verifier_path:
             specs = [GraderSpec(type="skillbench_verifier", weight=1.0)]
         else:
             specs = list(spec.graders)
+        # A judge is a judge however it got here. Whether the TASK listed it in `graders:` or we
+        # append it below, the same three gates decide: its switch, a judge key existing at all,
+        # and not being the free oracle health-check. Without this, `--llm-rubric no` silently kept
+        # judging any task that declared its own judge, and a task declaring one on a machine with
+        # no judge key failed the whole grading instead of skipping quietly.
+        switched_off = {t for t, on in (
+            ("llm_rubric", spec.run_llm_rubric),
+            ("fixed_rubric", spec.run_fixed_rubric),
+            ("adaptive_rubric", spec.run_adaptive_rubric),
+        ) if not on}
+        oracle_run = bool(getattr(harness, "runs_oracle", False))
+
+        def judge_runs(g: GraderSpec) -> bool:
+            if g.type in switched_off or oracle_run:
+                return False
+            # Adaptive may use its own provider (--adaptive-provider); everything else is env-driven.
+            own_provider = g.provider or (
+                spec.adaptive_provider if g.type == "adaptive_rubric" else None)
+            return pick_provider(own_provider, env) is not None
+
+        specs = [g for g in specs if g.type not in self._JUDGE_TYPES or judge_runs(g)]
         # The FIXED-rubric judge — the baseline rung: SAME rubric text for every task, same
         # protocol as the static judge, weight 0. Ordered before static so the ladder reads
         # fixed -> generated static -> adaptive on every run.
@@ -511,6 +554,7 @@ class EvalRunner:
             spec.run_adaptive_rubric
             and self.grade
             and not getattr(harness, "runs_oracle", False)
+            and not any(g.type == "adaptive_rubric" for g in specs)
             and pick_provider(ap, env) is not None
         ):
             if spec.adaptive_criteria_json:
@@ -572,20 +616,7 @@ class EvalRunner:
             # False = the skills above existed but were deliberately withheld (--no-skill).
             # Without this line a control run is indistinguishable from a task that has no skills.
             "skills_injected": spec.inject_skills,
-            "grading": {
-                "verifier": spec.verifier_path,
-                "oracle": spec.oracle_path,
-                "graders": [g.type for g in spec.graders],
-                # The judge, so the receipt shows BOTH scorers. "judge" is the provider that will
-                # be used (key name only, never the key); null = no key found, judge skipped.
-                # `source` and `rubric` are filled in AFTER the trials, from the rubric the
-                # judge actually used — not a guess about where one might come from.
-                # Absent = no judge ran (disabled, no key, or grading failed).
-                "llm_rubric": {
-                    "enabled": spec.run_llm_rubric,
-                    "judge": pick_provider(None, self.judge_env),
-                },
-            },
+            "grading": self._grading_manifest(spec),
             "timeout_sec": spec.timeout_sec,
             "adarubric_version": __version__,
             "written_at": _now(),
@@ -605,6 +636,67 @@ class EvalRunner:
         self._emit("trial_finished", harness.name, _safe(spec.name), attempt, TrialStage.FAILED,
                    trial=trial_id, meta=meta)
         return trial
+
+    #: Types that are LLM judges, not deterministic checks. A task may declare any of them itself
+    #: (with its own rubric file and weight); whatever it doesn't declare, the runner adds.
+    _JUDGE_TYPES = ("llm_rubric", "fixed_rubric", "adaptive_rubric")
+
+    def _grading_manifest(self, spec: EvalSpec) -> dict:
+        """Every scorer this run is configured with, its weight, and the rubric FILE it reads.
+
+        The whole scoring config on one screen, mirroring the task's ``adarubric.yaml``: the
+        deterministic checks first, then the three judges. Each judge names its rubric path even
+        when that file is generated on first use — "which text judged this run, and where do I
+        go to edit it?" has to be answerable from the receipt alone.
+        """
+        slug = _rubric_slug(spec.name)
+        rubrics = _rel(str(self.rubrics_root))
+        judge = pick_provider(None, self.judge_env)
+        own = {g.type: g for g in spec.graders if g.type in self._JUDGE_TYPES}
+
+        def entry(kind: str, enabled: bool, weight: float, fallback: str,
+                  path: str | None = None, provider: str | None = None) -> dict:
+            g = own.get(kind)
+            if g is not None:                      # the task declared this judge itself
+                weight = g.weight
+                path = g.rubric_path or ("inline in the task's yaml" if g.rubric else None)
+                provider = g.provider or provider
+            # "judge" is the provider NAME only, never a key. null = no key found, so this judge is
+            # skipped at grading time however the switch is set.
+            return {"enabled": enabled, "weight": weight,
+                    "defined_by": "task" if g is not None else "adarubric",
+                    "rubric": _rel(path) if path else fallback,
+                    "judge": provider or judge}
+
+        return {
+            "verifier": _rel(spec.verifier_path),
+            "oracle": _rel(spec.oracle_path),
+            # The non-judge scorers, whoever owns them: a SkillsBench task's verifier comes with
+            # the dataset (a wrapper cannot list it), a self-contained task's checks are commands
+            # in its own yaml. Either way they appear here, so `checks` + `judges` is always the
+            # complete list of what scored the run.
+            "checks": (
+                [{"type": "skillbench_verifier", "weight": 1.0}]
+                if spec.mode == "skillbench" and spec.verifier_path
+                else [{"type": g.type, "weight": g.weight}
+                      for g in spec.graders if g.type not in self._JUDGE_TYPES]
+            ),
+            "judges": {
+                "llm_rubric": entry(
+                    "llm_rubric", spec.run_llm_rubric, self._DEFAULT_LLM_WEIGHT,
+                    _rel(spec.static_rubric_path) if spec.static_rubric_path
+                    else f"{rubrics}/{slug}/static.md"),
+                "fixed_rubric": entry(
+                    "fixed_rubric", spec.run_fixed_rubric, 0.0,
+                    _rel(spec.fixed_rubric_path) if spec.fixed_rubric_path
+                    else f"{rubrics}/fixed.md"),
+                "adaptive_rubric": entry(
+                    "adaptive_rubric", spec.run_adaptive_rubric, 0.0,
+                    _rel(spec.adaptive_rubric_path) if spec.adaptive_rubric_path
+                    else f"{rubrics}/{slug}/adaptive.json",
+                    provider=pick_provider(spec.adaptive_provider, self.judge_env)),
+            },
+        }
 
     def _build_meta(self, *, harness, spec, run_output, env_key_used, started_at, success,
                     timed_out, error, command_count, changes, timing, reward, graded,

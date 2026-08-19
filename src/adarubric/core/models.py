@@ -313,6 +313,9 @@ class GraderSpec:
     type: str  # "deterministic" | "llm_rubric"
     command: str | None = None  # deterministic: shell command to run
     rubric: str | None = None  # llm_rubric: rubric TEXT (file paths are resolved at load time)
+    #: The file that text was read from, when `rubric:` named one. Kept so eval.yaml can say WHICH
+    #: file judged the run; None = the rubric was written inline in the yaml.
+    rubric_path: str | None = None
     model: str | None = None  # llm_rubric: model override
     provider: str | None = None  # llm_rubric: "gemini" | "anthropic" | "openai"
     weight: float = 1.0
@@ -380,6 +383,12 @@ class EvalSpec:
     #: the runner then falls back to the rubrics/<task>/ cache or generates.
     static_rubric_text: str | None = None
     adaptive_criteria_json: str | None = None
+    #: The file each rubric was read FROM, when the yaml named one. Text alone can't tell you what
+    #: judged a run; eval.yaml records these paths so the config is readable off the receipt.
+    #: None = no path given, so the rubrics/ cache (or a fresh generation) supplies it.
+    static_rubric_path: str | None = None
+    adaptive_rubric_path: str | None = None
+    fixed_rubric_path: str | None = None
 
     # Defaults a config file may carry (CLI flags override these; built-ins fill what's left).
     default_harness: str | None = None  # defaults.agent / defaults.harness in the yaml

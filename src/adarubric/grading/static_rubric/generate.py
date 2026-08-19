@@ -85,6 +85,9 @@ def generated_task_rubric(
 
 
 def _generate(spec: EvalSpec, provider: str, env: dict[str, str], model: str | None = None) -> str:
+    # True to skillgrade: the generator sees the instruction and the SKILL.md text — NOTHING
+    # else (skillgrade's init sends only skill summaries; no folder structure). The adaptive
+    # generator is ours and does get the structure; this one deliberately does not.
     skills = []
     for p in spec.skill_paths:
         md = Path(p) / "SKILL.md"

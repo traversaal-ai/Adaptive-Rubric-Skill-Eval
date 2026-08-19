@@ -50,14 +50,16 @@ This task needs files in the workspace before the agent starts, and the plain
 
 ## The LLM judges — this task shows all four scorers
 
-A judge API key in your `.env` (gemini picked first) turns the LLM judges on; each has an
-off switch (`--fixed-rubric no`, `--llm-rubric no`, `--adaptive-rubric no`).
+All four are declared in one `graders:` list in the yaml — type, weight, and the rubric file each
+one reads. A judge API key in your `.env` (gemini picked first) turns the three LLM judges on;
+without one they skip quietly and the script check still scores the run. Each has an off switch
+(`--fixed-rubric no`, `--llm-rubric no`, `--adaptive-rubric no`).
 
 | scorer | rubric it reads | weight |
 |---|---|---|
 | script check | the python one-liner in the yaml | 0.7 |
 | **fixed judge** — the baseline | [`../../rubrics/fixed.md`](../../rubrics/fixed.md) — same words for EVERY task; ours by default, edit it freely | 0 (shown only) |
-| static judge | this task's own [prompts/quality.md](prompts/quality.md) — workflow, naming, efficiency | 0.3 |
+| static judge | this task's own rubric, [`../../rubrics/fix-logging/static.md`](../../rubrics/fix-logging/static.md) — workflow, naming, efficiency | 0.3 |
 | adaptive rubric | 4 task-specific tests, generated on first run into `rubrics/fix-logging/adaptive.json`, judged blind with quoted evidence | 0 (shown only) |
 
 The run page on the dashboard shows all four sections with each judge's score and reasoning.

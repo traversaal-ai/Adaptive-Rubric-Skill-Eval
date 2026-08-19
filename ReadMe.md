@@ -210,17 +210,32 @@ docker:                        # your own task's container recipe (ignored with 
   base: python:3.12-slim
   setup: pip install pandas
 inject_skills: no              # control condition; --skill/--no-skill overrides
-graders:
-  - type: deterministic
+graders:                       # every scorer, one list: type + weight + the file it judges from
+  - type: deterministic         #   the script check — no rubric, it runs a command
     run: python graders/check.py
     weight: 0.7
-grading:                       # which LLM judges run — the yaml is the source of truth
+  - type: llm_rubric            #   the STATIC judge: this task's rubric
+    weight: 0.3
+    rubric: ../../rubrics/<task>/static.md
+  - type: fixed_rubric          #   the BASELINE: same rubric for every task
+    weight: 0.0
+    rubric: ../../rubrics/fixed.md
+  - type: adaptive_rubric       #   4 generated task-specific tests, judged blind
+    weight: 0.0
+    rubric: ../../rubrics/<task>/adaptive.json
+grading:                       # OR declare no judges above and switch them on here instead
   fixed_rubric: yes            # yes | no | a file path (= on, use exactly that file)
   static_rubric: yes           # lines left out = yes; flags override for one run
   adaptive_rubric: yes
 source: ../../dataset/...     # SkillsBench wrapper ONLY; combining with instruction/
                                # workspace/graders is an error
 ```
+
+Two ways to say the same thing. Spell every scorer out in `graders:` when you want the config to
+name its files ([`tasks/fix-logging`](tasks/fix-logging/adarubric.yaml) does), or declare only your
+script checks and let the `grading:` switches add the judges with the `rubrics/<task>/` files. Either
+way the same gates apply: a judge runs only if its switch is on, a judge key exists, and the run
+isn't the free oracle check — and `--llm-rubric no` and friends still win for one run.
 
 `TASK.md` + `grader.yaml` work as a simpler substitute (no workspace/defaults). The skill must
 live at the task root (whole folder = skill, only for one-skill-and-nothing-else) or under
@@ -243,6 +258,27 @@ Any other exit = **grading failed**, shown as our problem, never as a zero.
 Judge selection: `JUDGE_LLM_PROVIDER`/`JUDGE_API_KEY`/`JUDGE_MODEL` in `.env` — independent of
 the agent. Unset → first key found (gemini → anthropic → openai → together). No key → judges skip
 quietly, script checks still run.
+
+Every run writes what scored it into `attempt-N/eval.yaml`, so no score needs the source code to
+explain it — each scorer with its weight, whether the task or AdaRubric declared it, and the
+rubric FILE it read:
+
+```yaml
+grading:
+  checks:                                      # commands from your yaml — no rubric to read
+  - {type: deterministic, weight: 0.7}
+  judges:
+    llm_rubric:      {enabled: true, weight: 0.3, defined_by: adarubric, rubric: rubrics/fix-logging/static.md,     judge: gemini}
+    fixed_rubric:    {enabled: true, weight: 0.0, defined_by: adarubric, rubric: rubrics/fixed.md,                  judge: gemini}
+    adaptive_rubric: {enabled: true, weight: 0.0, defined_by: adarubric, rubric: rubrics/fix-logging/adaptive.json, judge: gemini}
+```
+
+`defined_by: task` appears instead when a task declares a judge itself, with a `rubric:` of its
+own in `graders:` — then that file and weight are what get recorded.
+
+After the trials, `llm_rubric` also gains `source:` and `rubric_text:` — the exact words the judge
+scored against, in case that file is later edited or regenerated. `judge:` is a provider name, never
+a key; `null` there means no key was found, so that judge was skipped whatever its switch said.
 
 ## CLI
 
